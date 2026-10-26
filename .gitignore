@@ -13,3 +13,6 @@ runs/**
 !runs/ppo_ft/
 !runs/ppo_ft/final.zip
 !runs/ppo_v1.zip
+!runs/exp_ctrl/
+!runs/exp_ctrl/final.zip
+!runs/exp_ctrl/final_eval_final.json

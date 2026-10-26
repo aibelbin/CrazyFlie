@@ -250,8 +250,19 @@ def read_jsonl(path: str) -> list:
 
 
 def make_handler(sim: Sim, runs_dir: str, runs: list):
-    run_ids = {r["id"] for r in runs}
-    dash_page = DASH_PAGE.replace("%STYLE%", STYLE).replace("%RUNS%", json.dumps(runs))
+    def current_runs() -> list:
+        """The runs to show: the fixed list, or (if empty) every exp_*/main_* folder found."""
+        if runs:
+            return runs
+        try:
+            names = sorted(d for d in os.listdir(runs_dir)
+                           if d.startswith(("exp_", "main_")) and os.path.isdir(os.path.join(runs_dir, d)))
+        except OSError:
+            names = []
+        return [{"id": n, "title": n.replace("_", " ")} for n in names]
+
+    def dash_page() -> str:
+        return DASH_PAGE.replace("%STYLE%", STYLE).replace("%RUNS%", json.dumps(current_runs()))
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *a):
@@ -278,8 +289,9 @@ def make_handler(sim: Sim, runs_dir: str, runs: list):
         def do_GET(self):
             path = self.path.split("?")[0]
             parts = path.strip("/").split("/")
+            run_ids = {r["id"] for r in current_runs()}
             if path == "/":
-                self._send(200, dash_page.encode(), "text/html; charset=utf-8")
+                self._send(200, dash_page().encode(), "text/html; charset=utf-8")
             elif path == "/play":
                 sim.touch()
                 self._send(200, PLAY_PAGE.encode(), "text/html; charset=utf-8")
@@ -374,7 +386,7 @@ def main():
     ap.add_argument("--difficulty", type=int, default=2)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--runs-dir", default="runs", help="folder containing the training run folders")
-    ap.add_argument("--runs", default="", help="comma list of run folder names to show, e.g. long_a,long_b")
+    ap.add_argument("--runs", default="auto", help="comma list of run folders to show, or auto")
     args = ap.parse_args()
 
     policies = {"reactive": reactive_follow, "naive": naive_follow}
@@ -385,7 +397,8 @@ def main():
             policies["trained"] = smoothed(policies["trained"], args.smooth)
     sim = Sim(policies, "trained" if "trained" in policies else "reactive", args.difficulty, args.seed)
     threading.Thread(target=sim.run, daemon=True).start()
-    runs = [{"id": r, "title": f"Run {r.split('_')[-1].upper()}  ({r})"} for r in args.runs.split(",") if r]
+    names = [r for r in args.runs.split(",") if r and r != "auto"]      # "auto" = discover exp_*/main_*
+    runs = [{"id": r, "title": r.replace("_", " ")} for r in names]
     server = ThreadingHTTPServer((args.host, args.port), make_handler(sim, args.runs_dir, runs))
     print(f"serving on http://{args.host}:{args.port}  runs={[r['id'] for r in runs]}", flush=True)
     try:
