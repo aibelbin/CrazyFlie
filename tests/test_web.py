@@ -11,33 +11,37 @@ from drone_follow.env import make_env
 from drone_follow.web import Sim, make_handler
 
 
-def _spectator_env(tmp_path, every=5):
-    live = str(tmp_path / "live.jpg")
+def _spectator_env(tmp_path, every=5, difficulty=2):
+    live = str(tmp_path / "state.json")
     spec = dict(path=live, label="test", every=every)
-    return make_env(difficulty=2, seed=1, spectate=spec)(), live
+    return make_env(difficulty=difficulty, seed=1, spectate=spec)(), live
 
 
-def test_spectator_writes_frames_only_while_watched(tmp_path):
+def test_spectator_writes_poses_only_while_watched(tmp_path):
     env, live = _spectator_env(tmp_path)
     env.reset(seed=1)
-    for _ in range(90):                                   # nobody watching: no rendering
+    for _ in range(90):                                   # nobody watching: nothing is written
         env.step(np.zeros(3))
     assert not os.path.exists(live)
     (tmp_path / "watch").write_text("now")               # a viewer appears
     for _ in range(90):
         env.step(np.zeros(3))
-    assert os.path.getsize(live) > 1000
+    msg = json.loads(open(live).read())
+    assert len(msg["drone"]["p"]) == 3 and msg["status"] and "test" in msg["policy"]
+    assert json.loads(open(tmp_path / "world.json").read())["ep"] == msg["ep"]
     env.close()
 
 
-def test_spectator_survives_episode_resets(tmp_path):
-    env, live = _spectator_env(tmp_path, every=3)
+def test_spectator_survives_episode_resets_and_writes_terrain(tmp_path):
+    env, live = _spectator_env(tmp_path, every=3, difficulty=4)
     (tmp_path / "watch").write_text("now")
     for ep in range(3):
         env.reset(seed=ep)
         for _ in range(40):
             env.step(np.array([1.0, 0.0, 0.0]))
     assert os.path.exists(live)
+    world = json.loads(open(tmp_path / "world.json").read())
+    assert world["ep"] == 3 and world["terrain"]["n"] == 121 and len(world["statics"]) > 40
     env.close()
 
 
@@ -105,3 +109,26 @@ def test_publish_snapshot_has_everything_the_viewer_draws():
     assert {o["k"] for o in msg["obs"]} >= {"debris", "pedestrian"}
     assert all(set(o) >= {"id", "p", "v", "r", "a", "g"} for o in msg["obs"])
     env.close()
+
+
+def test_training_worker_view_streams_poses_and_world(tmp_path):
+    run = tmp_path / "main_s1"
+    run.mkdir()
+    (run / "state.json").write_text(json.dumps({"ep": 2, "status": "FOLLOW TARGET"}))
+    (run / "world.json").write_text(json.dumps({"ep": 2, "terrain": None, "statics": []}))
+    (run / "progress.json").write_text(json.dumps({"steps": 5, "total": 10, "pct": 50.0}))
+    handler = make_handler(Sim({}, "reactive", 2, 0), str(tmp_path), [])           # runs found automatically
+    server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    base = f"http://127.0.0.1:{server.server_address[1]}"
+    try:
+        assert [r["id"] for r in json.load(urllib.request.urlopen(base + "/api/runs"))] == ["main_s1"]
+        assert "viewer.js" in urllib.request.urlopen(base + "/watch?run=main_s1").read().decode()
+        assert json.load(urllib.request.urlopen(base + "/train/main_s1/world"))["ep"] == 2
+        stream = urllib.request.urlopen(base + "/train/main_s1/events", timeout=5)
+        line = stream.readline().decode()
+        assert line.startswith("data: ") and json.loads(line[6:])["ep"] == 2
+        stream.close()
+        assert (run / "watch").exists()                                             # asked the worker to write poses
+    finally:
+        server.shutdown()

@@ -286,11 +286,11 @@ class SingleDroneWrapper(gym.Wrapper):
 def make_env(difficulty: int = 2, seed: int | None = None, gui: bool = False,
              episode_sec: float = C.EPISODE_SEC, pedestrians: bool = True,
              realistic: bool = False, spectate: dict | None = None):
-    """Thunk that builds an env. `spectate` = dict(path=..., label=...) makes it write live frames."""
+    """Thunk that builds an env. `spectate` = dict(path=..., label=...) makes it write live poses for the 3D viewer."""
     def _thunk():
         env = SingleDroneWrapper(FollowAvoidAviary(
             gui=gui, difficulty=difficulty, seed=seed, episode_sec=episode_sec,
-            pedestrians=pedestrians, realistic=realistic or bool(spectate)))
+            pedestrians=pedestrians, realistic=realistic))
         if spectate:
             from drone_follow.spectator import SpectatorWrapper
             env = SpectatorWrapper(env, **spectate)

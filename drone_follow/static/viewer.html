@@ -26,6 +26,10 @@
   .grp{display:flex;gap:6px;flex-wrap:wrap;align-items:center}
   .sep{width:1px;height:26px;background:#ffffff26;margin:0 2px}
   #hint{position:fixed;right:var(--gut);bottom:calc(max(12px,env(safe-area-inset-bottom)) + 74px);padding:6px 10px;color:var(--mut);font-size:12px;pointer-events:none}
+  #watchbar{position:fixed;left:var(--gut);right:var(--gut);bottom:max(12px,env(safe-area-inset-bottom));padding:12px 14px;display:none;gap:14px;align-items:center}
+  #pbar{flex:1;height:12px;border-radius:7px;background:#ffffff26;overflow:hidden;min-width:80px}
+  #pbar>i{display:block;height:100%;width:0;background:var(--acc);transition:width .6s}
+  #ptxt{font-weight:650;white-space:nowrap}
   #flash{position:fixed;inset:0;pointer-events:none;box-shadow:inset 0 0 120px 20px #ef4444;opacity:0;transition:opacity .5s}
   @media (max-width:640px){#hint{display:none}#meta{display:none}.sep{display:none}}
 </style>
@@ -61,6 +65,11 @@
     <button id="follow" class="on">Follow cam</button>
     <button id="trail" class="on">Trail</button>
   </div>
+</div>
+<div id="watchbar" class="glass">
+  <select id="runsel" aria-label="training run"></select>
+  <div id="pbar"><i></i></div>
+  <span id="ptxt">–</span>
 </div>
 <script src="/static/three.min.js"></script>
 <script src="/static/OrbitControls.js"></script>

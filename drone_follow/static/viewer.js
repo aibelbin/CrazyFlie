@@ -2,6 +2,9 @@
  * Sim coordinates are z-up; everything lives in `world`, rotated so three.js (y-up) shows it upright. */
 (() => {
 const $ = id => document.getElementById(id);
+const RUN = new URLSearchParams(location.search).get('run');          // set: watching a training worker, not a demo
+const EVENTS = RUN ? `/train/${RUN}/events` : '/events';
+const WORLD = RUN ? `/train/${RUN}/world` : '/api/world';
 const canvas = $('c');
 const renderer = new THREE.WebGLRenderer({canvas, antialias: true});
 renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
@@ -260,7 +263,7 @@ function buildWorld(w) {
     else { const base = list[0]; tree(base.p[0], base.p[1], g % 3 ? 'pine' : 'oak', g % 3 ? .75 : 1.0, base.p[2] - .45, terrainGroup); }
   }
 }
-function loadWorld() { fetch('/api/world').then(r => r.json()).then(buildWorld).catch(() => {}); }
+function loadWorld() { fetch(WORLD).then(r => r.json()).then(buildWorld).catch(() => {}); }
 
 /* ---------- state buffer + interpolation ---------- */
 const buf = [];
@@ -352,7 +355,8 @@ function setHud(s) {
   const w = s.wind || [0, 0, 0], ws = Math.hypot(w[0], w[1]);
   $('wtxt').textContent = ws < .3 ? 'calm' : ws.toFixed(1) + ' m/s';
   windAngle = Math.atan2(w[0], w[1]); $('wind').style.opacity = ws < .3 ? .55 : 1;
-  $('meta').textContent = `${s.policy} policy · level ${s.difficulty} · ${s.episodes} episodes · ${s.collisions} collisions`;
+  $('meta').textContent = RUN ? `${s.policy} · level ${s.difficulty} · ${s.episodes} episodes, ${s.collisions} crashes`
+    : `${s.policy} policy · level ${s.difficulty} · ${s.episodes} episodes · ${s.collisions} collisions`;
   document.querySelectorAll('#pol button').forEach(b => b.classList.toggle('on', b.dataset.pol === s.policy));
   if (document.activeElement !== $('diff')) $('diff').value = s.difficulty;
 }
@@ -363,13 +367,14 @@ $('diff').onchange = e => post('difficulty/' + e.target.value);
 $('follow').onclick = e => { follow = !follow; e.target.classList.toggle('on', follow); };
 $('trail').onclick = e => { trailOn = !trailOn; e.target.classList.toggle('on', trailOn); };
 addEventListener('keydown', e => {
+  if (RUN) return;
   const k = {o: 'debris', r: 'rival', p: 'pedestrian', n: 'new'}[e.key]; if (k && !e.target.matches('select')) post(k);
   if ({1: 'trained', 2: 'reactive', 3: 'naive'}[e.key]) post('policy/' + {1: 'trained', 2: 'reactive', 3: 'naive'}[e.key]);
   if (e.key === 'c') $('follow').click();
 });
 
 function connect() {
-  const es = new EventSource('/events');
+  const es = new EventSource(EVENTS);
   es.onmessage = ev => {
     const s = JSON.parse(ev.data); s.rt = performance.now();
     if (s.ep !== episode) { episode = s.ep; clearDynamic(); buf.length = 0; loadWorld(); }
@@ -378,6 +383,23 @@ function connect() {
   es.onerror = () => { $('label').textContent = 'RECONNECTING'; es.close(); setTimeout(connect, 1500); };
 }
 connect();
+
+if (RUN) {                                                  // training view: a progress bar and a run picker instead of controls
+  $('bar').style.display = 'none'; $('watchbar').style.display = 'flex'; $('hint').style.display = 'none';
+  fetch('/api/runs').then(r => r.json()).then(runs => {
+    $('runsel').innerHTML = runs.map(r => `<option value="${r.id}"${r.id === RUN ? ' selected' : ''}>${r.title}</option>`).join('');
+    $('runsel').onchange = e => { location.search = '?run=' + e.target.value; };
+  }).catch(() => {});
+  const poll = () => {
+    fetch(`/train/${RUN}/progress`).then(r => r.json()).then(d => {
+      const p = d.progress || {}, lag = p.updated_at ? Date.now() / 1000 - p.updated_at : null;
+      $('pbar').firstElementChild.style.width = (p.pct || 0) + '%';
+      $('ptxt').textContent = p.total ? `${p.pct.toFixed(1)}% · ${(p.steps / 1e6).toFixed(1)}M / ${(p.total / 1e6).toFixed(0)}M steps` + (lag > 120 ? ' · no update' : '') : 'waiting for first update';
+    }).catch(() => {});
+    setTimeout(poll, 3000);
+  };
+  poll();
+}
 
 function resize() {
   const w = innerWidth, h = innerHeight; renderer.setSize(w, h, false); camera.aspect = w / h; camera.updateProjectionMatrix();

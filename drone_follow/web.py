@@ -19,14 +19,13 @@ import os
 import queue
 import threading
 import time
-
-import numpy as np
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from drone_follow import config as C
 from drone_follow.env import FollowAvoidAviary, SingleDroneWrapper
 from drone_follow.policies import naive_follow, reactive_follow, smoothed
 from drone_follow.render import status_from
+from drone_follow.snapshot import pose_snapshot, world_snapshot
 
 IDLE_AFTER_S = 8.0
 STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
@@ -54,6 +53,7 @@ STYLE = """
  .bar{height:10px;border-radius:6px;background:#8883;overflow:hidden;margin:6px 0}
  .bar>i{display:block;height:100%;background:var(--acc)}
  .kv{display:grid;grid-template-columns:auto auto;gap:2px 14px;justify-content:start;margin:8px 0}
+ a.btn{display:inline-block;background:var(--acc);color:#fff;border-radius:8px;padding:9px 14px;text-decoration:none;margin:2px 0 8px}
  .kv b{font-weight:600} canvas{width:100%;height:170px;display:block}
 """
 
@@ -61,8 +61,8 @@ DASH_PAGE = """<!doctype html><html><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Drone training dashboard</title><style>%STYLE%</style></head><body><main>
 <h1>Drone follow-and-avoid: training</h1>
-<div class="mut">Live episodes from one training worker per run (random exploration early on, sped up),
- plus scores on fixed unseen scenarios. <a href="/play">Watch a finished model in 3D</a></div>
+<div class="mut">Progress and scores for each run. "Watch live in 3D" shows one training worker's current episode
+ (sped up, so early on it looks clumsy). <a href="/play">Watch a finished model in 3D</a></div>
 <div class="grid" id="runs" style="margin-top:12px"></div>
 <script>
 const RUNS=%RUNS%, COL=['var(--a)','var(--b)','var(--c)','var(--d)'];
@@ -72,7 +72,7 @@ const fmt=(x,d=1)=>x==null?'–':x.toFixed(d), pct=x=>x==null?'–':(100*x).toFi
 const hrs=h=>h==null?'–':(h<1?Math.round(h*60)+' min':h.toFixed(1)+' h');
 document.getElementById('runs').innerHTML=RUNS.map((r,i)=>`
  <div class="card"><h2 style="color:${COL[i%4]}">${r.title}</h2>
-  <img src="/train/${r.id}/stream" alt="live training episode">
+  <a class="btn" href="/watch?run=${r.id}">Watch live in 3D</a>
   <div class="bar"><i id="bar-${r.id}" style="width:0%"></i></div>
   <div class="kv" id="kv-${r.id}"></div>
   <canvas id="ch-${r.id}" width="600" height="220"></canvas>
@@ -116,21 +116,6 @@ poll();
 </script></main></body></html>"""
 
 
-def _r(v, n=3):
-    return [round(float(x), n) for x in v]
-
-
-def world_snapshot(sc, episode_id: int) -> bytes:
-    """Static scenery for the viewer (fetched once per episode): terrain heights, trees and rocks."""
-    terrain = None
-    if sc.terrain is not None:
-        from drone_follow.world import GRID, HALF
-        terrain = {"half": HALF, "n": GRID, "z": [round(float(v), 2) for v in sc.terrain.grid().flatten()]}
-    statics = [{"k": str(k), "p": _r(pp, 2), "r": round(float(r), 2), "g": int(g)}
-               for pp, r, k, g in zip(sc.static_pos, sc.static_r, sc.static_kind, sc.static_group)]
-    return json.dumps({"ep": episode_id, "terrain": terrain, "statics": statics}, separators=(",", ":")).encode()
-
-
 class Sim:
     """Owns the /play simulation. Only its own thread touches PyBullet; handlers send commands.
     Each control step it publishes a JSON snapshot of every pose for the browser to draw."""
@@ -150,18 +135,10 @@ class Sim:
         self.last_seen = time.time()
 
     def publish(self, sim):
-        sc = sim.scenario
-        obs = [{"id": i, "k": o.kind, "p": _r(o.pos), "v": _r(o.vel), "r": round(float(o.radius), 3),
-                "a": int(o.active), "g": o.group} for i, o in enumerate(sc.obstacles)]
-        wind = sim._wind.mean + sim._wind.dev if sim._wind is not None else np.zeros(3)
-        msg = {"ep": self.episode_id, "drone": {"p": _r(sim.pos[0]), "q": _r(sim.quat[0], 4), "v": _r(sim.vel[0]),
-                                                  "gz": round(sc.ground(sim.pos[0][:2]), 3)},
-               "person": {"p": _r(sc.person), "v": _r(sc.person_vel), "gz": round(sc.ground(sc.person), 3)},
-               "wind": _r(wind, 2), "obs": obs,
-               "status": self.status, "policy": self.current, "difficulty": self.difficulty,
-               "episodes": self.episodes, "collisions": self.collisions}
+        msg = pose_snapshot(sim, self.episode_id, self.status, self.current, self.difficulty,
+                            self.episodes, self.collisions)
         with self.cond:
-            self.state, self.frame_no = json.dumps(msg, separators=(",", ":")), self.frame_no + 1
+            self.state, self.frame_no = msg, self.frame_no + 1
             self.cond.notify_all()
 
     def run(self):
@@ -262,15 +239,12 @@ def make_handler(sim: Sim, runs_dir: str, runs: list):
             self.end_headers()
             self.wfile.write(body)
 
-        def _mjpeg_headers(self):
+        def _sse_headers(self):
             self.send_response(200)
-            self.send_header("Content-Type", "multipart/x-mixed-replace; boundary=frame")
+            self.send_header("Content-Type", "text/event-stream")
             self.send_header("Cache-Control", "no-store")
+            self.send_header("X-Accel-Buffering", "no")
             self.end_headers()
-
-        def _frame(self, jpeg: bytes):
-            self.wfile.write(b"--frame\r\nContent-Type: image/jpeg\r\nContent-Length: "
-                             + str(len(jpeg)).encode() + b"\r\n\r\n" + jpeg + b"\r\n")
 
         def _static(self, name: str):
             if name not in STATIC_TYPES:
@@ -288,6 +262,10 @@ def make_handler(sim: Sim, runs_dir: str, runs: list):
             elif path == "/play":
                 sim.touch()
                 self._static("viewer.html")
+            elif path == "/watch":                         # the same viewer, fed by a training worker
+                self._static("viewer.html")
+            elif path == "/api/runs":
+                self._send(200, json.dumps(current_runs()).encode())
             elif len(parts) == 2 and parts[0] == "static":
                 self._static(parts[1])
             elif path == "/api/state":
@@ -298,11 +276,7 @@ def make_handler(sim: Sim, runs_dir: str, runs: list):
             elif path == "/api/world":
                 self._send(200, sim.world_json)
             elif path == "/events":                       # server-sent events: one pose snapshot per step
-                self.send_response(200)
-                self.send_header("Content-Type", "text/event-stream")
-                self.send_header("Cache-Control", "no-store")
-                self.send_header("X-Accel-Buffering", "no")
-                self.end_headers()
+                self._sse_headers()
                 last = -1
                 try:
                     while True:
@@ -320,15 +294,22 @@ def make_handler(sim: Sim, runs_dir: str, runs: list):
                     "progress": read_json(os.path.join(d, "progress.json")),
                     "evals": read_jsonl(os.path.join(d, "eval_log.jsonl")),
                     "best": read_json(os.path.join(d, "best.json"))}).encode())
-            elif len(parts) == 3 and parts[0] == "train" and parts[1] in run_ids and parts[2] == "stream":
+            elif len(parts) == 3 and parts[0] == "train" and parts[1] in run_ids and parts[2] == "world":
+                world = os.path.join(runs_dir, parts[1], "world.json")
+                try:
+                    with open(world, "rb") as f:
+                        self._send(200, f.read())
+                except OSError:
+                    self._send(200, b"{}")
+            elif len(parts) == 3 and parts[0] == "train" and parts[1] in run_ids and parts[2] == "events":
                 d = os.path.join(runs_dir, parts[1])
-                flag, live = os.path.join(d, "watch"), os.path.join(d, "live.jpg")
-                self._mjpeg_headers()
-                last_m, last_flag = 0.0, 0.0
+                flag, state = os.path.join(d, "watch"), os.path.join(d, "state.json")
+                self._sse_headers()
+                last_m, last_flag, last_beat = 0.0, 0.0, time.time()
                 try:
                     while True:
                         now = time.time()
-                        if now - last_flag > 2.0:          # tells the training worker to render
+                        if now - last_flag > 2.0:          # tells the training worker to write poses
                             try:
                                 with open(flag, "w") as f:
                                     f.write(str(now))
@@ -336,17 +317,26 @@ def make_handler(sim: Sim, runs_dir: str, runs: list):
                                 pass
                             last_flag = now
                         try:
-                            m = os.path.getmtime(live)
+                            m = os.path.getmtime(state)
                         except OSError:
                             m = 0.0
                         if m and m != last_m:
-                            with open(live, "rb") as f:
-                                data = f.read()
                             last_m = m
+                            try:
+                                with open(state, "rb") as f:
+                                    data = f.read()
+                            except OSError:
+                                data = b""
                             if data:
-                                self._frame(data)
-                        time.sleep(0.08)
-                except (BrokenPipeError, ConnectionResetError):
+                                self.wfile.write(b"data: " + data + b"\n\n")
+                                self.wfile.flush()
+                                last_beat = now
+                        elif now - last_beat > 10.0:
+                            self.wfile.write(b": keepalive\n\n")
+                            self.wfile.flush()
+                            last_beat = now
+                        time.sleep(0.04)
+                except (BrokenPipeError, ConnectionResetError, OSError):
                     pass
             else:
                 self._send(404, b"not found", "text/plain")

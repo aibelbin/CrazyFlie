@@ -216,12 +216,13 @@ def main():
     def lr_schedule(progress_remaining: float) -> float:
         return args.lr_end + (args.lr_start - args.lr_end) * progress_remaining
 
-    spectate = dict(path=os.path.join(args.out, "live.jpg"),
+    spectate = dict(path=os.path.join(args.out, "state.json"),
                     label=f"{os.path.basename(os.path.normpath(args.out))} worker",
                     progress_path=os.path.join(args.out, "progress.json"))
+    watched = min(5, args.envs - 1)      # a hard worker: level 4 in the F450 warm-up mix, level 5 afterwards
     venv = VecMonitor(SubprocVecEnv(
         [make_env(difficulty=2, seed=args.seed * 1000 + i,
-                  spectate=spectate if i == 2 else None)     # worker 2 is level 2 in both mixes
+                  spectate=spectate if i == watched else None)
          for i in range(args.envs)]))
     n_steps = 2048
     batch = min(2048, n_steps * args.envs // 4)

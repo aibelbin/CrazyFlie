@@ -35,10 +35,11 @@ python -m drone_follow.web --model runs/exp_ctrl/final.zip --port 8765 --runs-di
 ```
 
 Open `http://<machine>:8765`:
-- `/` is a **training dashboard**: for each run, a live episode from one training worker (sped up,
-  exploring) plus steps, speed, ETA, training collision rate, average reward and a chart of the
-  periodic evaluation scores against the hand-written baseline. The worker only renders while the
-  page is open.
+- `/` is a **training dashboard**: for each run the progress bar, steps, speed, ETA, training collision
+  rate, average reward and a chart of the periodic evaluation scores. Each run has a **Watch live in 3D**
+  button (`/watch?run=<run>`): the same 3D viewer, showing one training worker's current episode (sped up,
+  and clumsy early on) with a progress bar and a picker to switch runs. The worker only writes poses while
+  a viewer is open.
 - `/play` is a **3D scene** (three.js): the finished model flies in the simulation, which runs on the
   server and streams poses to the browser. F450-style quadcopters with spinning props, walking people,
   rocks and rival drones, a forest, buildings and hills. Drag to orbit, scroll or pinch to zoom,
@@ -102,6 +103,7 @@ clearly worse, so `ppo_ft` is the model to use; the cause was not investigated.
 | `drone_follow/f450.py` | F450 model, ArduPilot-style velocity controller, motor lag, wind |
 | `drone_follow/world.py` | terrain, forest and rocks for levels 4-5 |
 | `drone_follow/web.py` | web server: training dashboard and the 3D viewer's pose stream |
+| `drone_follow/snapshot.py`, `spectator.py` | pose/world JSON for the viewer; the training worker that writes it |
 | `drone_follow/static/` | the three.js viewer (`viewer.html`, `viewer.js`) and its vendored libraries |
 | `drone_follow/evaluate.py` | collision rate / follow error on fixed seeds |
 | `drone_follow/demo_sim.py` | side-by-side clips of policies on the same scenario |
