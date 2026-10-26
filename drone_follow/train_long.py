@@ -67,6 +67,12 @@ class BestByCollisions(BaseCallback):
         super().__init__()
         self.out, self.every, self.episodes, self.levels = out, every, episodes, levels
         self.envs, self.last, self.best = {}, 0, np.inf
+        try:                                    # resuming: keep the best score from before
+            with open(os.path.join(out, "best.json")) as f:
+                self.best = float(json.load(f)["score"])
+            print(f"restored previous best score {self.best:.4f}", flush=True)
+        except (OSError, ValueError, KeyError):
+            pass
 
     def _on_step(self) -> bool:
         if self.num_timesteps - self.last >= self.every:

@@ -47,6 +47,7 @@ class FollowAvoidAviary(BaseRLAviary):
         self._clearance = np.inf
         self._crashed = False
         self._first_obs = True
+        self._tilt = 0.0
         super().__init__(
             drone_model=DroneModel.CF2X, num_drones=1,
             initial_xyzs=self._scenario.drone_start[None, :].copy(),
@@ -98,6 +99,9 @@ class FollowAvoidAviary(BaseRLAviary):
 
     def step(self, action):
         a = np.clip(np.asarray(action, float).reshape(3), -1.0, 1.0)
+        if C.ACTION_RATE_LIMIT > 0:          # smooth by construction: bound how fast the command may change
+            lim = C.ACTION_RATE_LIMIT
+            a = self._prev_action + np.clip(a - self._prev_action, -lim, lim)
         self._scenario.advance(self.CTRL_TIMESTEP, self.pos[0])
         self._action = a
         out = super().step(a)
@@ -116,6 +120,7 @@ class FollowAvoidAviary(BaseRLAviary):
         self._ranges = new_ranges
         self._first_obs = False
         self._clearance = self._scenario.clearance(pos)
+        self._tilt = float(max(abs(rpy[0]), abs(rpy[1])))
         self._crashed = (self._clearance < 0.0 or pos[2] < C.GROUND_Z
                          or abs(rpy[0]) > C.MAX_TILT or abs(rpy[1]) > C.MAX_TILT)
 
@@ -162,6 +167,9 @@ class FollowAvoidAviary(BaseRLAviary):
         urgency, nearness = self._hazard_terms()
         smooth = -C.R_SMOOTH * float(np.linalg.norm(self._action - self._prev_action))
         total = follow + proximity - C.R_TTC * urgency - C.R_CLEAR * nearness + smooth
+        if C.R_TILT > 0:
+            lean = np.clip((self._tilt - C.TILT_START) / (C.MAX_TILT - C.TILT_START), 0.0, 1.0)
+            total -= C.R_TILT * lean ** 2
         return total * C.REWARD_SCALE
 
     def _computeTerminated(self):
@@ -173,8 +181,20 @@ class FollowAvoidAviary(BaseRLAviary):
         timeout = self.step_counter / self.PYB_FREQ > self.episode_sec
         return bool(out or timeout)
 
+    def _collision_kind(self):
+        """What ended the episode: the kind of the nearest hazard, 'ground' or 'flip' (None if no crash)."""
+        if not self._crashed:
+            return None
+        pos = self.pos[0]
+        if self._clearance < 0.0:
+            live = self._scenario.live_obstacles()
+            gaps = [float(np.linalg.norm(pos - o.pos)) - o.radius for o in live]
+            return live[int(np.argmin(gaps))].kind
+        return "ground" if pos[2] < C.GROUND_Z else "flip"
+
     def _computeInfo(self):
-        return {"collision": bool(self._crashed), "follow_dist": self._follow_dist,
+        return {"collision": bool(self._crashed), "collision_kind": self._collision_kind(),
+                "follow_dist": self._follow_dist,
                 "min_range": float(self._ranges.min()),
                 "clearance": float(self._clearance)}
 

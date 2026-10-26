@@ -25,7 +25,7 @@ import cv2
 from drone_follow import config as C
 from drone_follow.drone_visual import DroneVisual
 from drone_follow.env import FollowAvoidAviary, SingleDroneWrapper
-from drone_follow.policies import naive_follow, reactive_follow
+from drone_follow.policies import naive_follow, reactive_follow, smoothed
 from drone_follow.render import render_frame, status_from
 
 IDLE_AFTER_S = 8.0
@@ -137,7 +137,7 @@ async function poll(){
    document.getElementById('kv-'+r.id).innerHTML=
     `<span class="mut">steps</span><b>${fmt((p.steps||0)/1e6,2)}M / ${fmt((p.total||0)/1e6,0)}M (${fmt(p.pct,1)}%)</b>
      <span class="mut">speed</span><b>${fmt(p.sps,0)} steps/s</b>
-     <span class="mut">time</span><b>${hrs(p.elapsed_h)} in · ETA ${hrs(p.eta_h)} (limit ${hrs(p.budget_h)})</b>
+     <span class="mut">time</span><b>${hrs(p.elapsed_h)} in · ETA ${hrs(p.eta_h)} ${p.budget_h>1000?'(no time limit)':'(limit '+hrs(p.budget_h)+')'}</b>
      <span class="mut">stage</span><b>${p.phase||'–'}</b>
      <span class="mut">training collisions</span><b>${pct(p.train_collision_rate)} of last ${p.n_recent||0} episodes</b>
      <span class="mut">avg reward / length</span><b>${fmt(p.ep_reward,1)} / ${fmt(p.ep_len_s,1)} s</b>
@@ -369,6 +369,8 @@ def main():
     ap.add_argument("--model", default=None, help="trained PPO .zip for /play")
     ap.add_argument("--host", default="0.0.0.0")
     ap.add_argument("--port", type=int, default=8765)
+    ap.add_argument("--smooth", type=float, default=0.0,
+                    help="low-pass the trained policy's commands (0 = off, 0.5 = recommended)")
     ap.add_argument("--difficulty", type=int, default=2)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--runs-dir", default="runs", help="folder containing the training run folders")
@@ -379,6 +381,8 @@ def main():
     if args.model:
         from drone_follow.evaluate import load_ppo_policy
         policies["trained"] = load_ppo_policy(args.model)
+        if args.smooth > 0:
+            policies["trained"] = smoothed(policies["trained"], args.smooth)
     sim = Sim(policies, "trained" if "trained" in policies else "reactive", args.difficulty, args.seed)
     threading.Thread(target=sim.run, daemon=True).start()
     runs = [{"id": r, "title": f"Run {r.split('_')[-1].upper()}  ({r})"} for r in args.runs.split(",") if r]

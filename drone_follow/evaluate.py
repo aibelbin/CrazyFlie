@@ -4,12 +4,13 @@
 """
 import argparse
 import json
+from collections import Counter
 
 import numpy as np
 
 from drone_follow import config as C
 from drone_follow.env import make_env
-from drone_follow.policies import naive_follow, reactive_follow
+from drone_follow.policies import blended, naive_follow, reactive_follow, smoothed
 
 
 def run_episodes(policy, difficulty: int, episodes: int, seed0: int = 10_000,
@@ -17,6 +18,7 @@ def run_episodes(policy, difficulty: int, episodes: int, seed0: int = 10_000,
     env = make_env(difficulty=difficulty, seed=seed0, pedestrians=pedestrians)()
     crashes, errs, durations = 0, [], []
     action_change, accel = [], []                 # smoothness: command jitter, true acceleration
+    kinds = Counter()                             # what each crash hit
     for ep in range(episodes):
         obs, _ = env.reset(seed=seed0 + ep)
         done, steps, prev_a, prev_v = False, 0, None, None
@@ -33,12 +35,15 @@ def run_episodes(policy, difficulty: int, episodes: int, seed0: int = 10_000,
             steps += 1
             done = term or trunc
         crashes += int(info["collision"])
+        if info["collision"]:
+            kinds[info.get("collision_kind")] += 1
         durations.append(steps / C.CTRL_FREQ)
     env.close()
     return {"difficulty": difficulty, "episodes": episodes,
             "collision_rate": crashes / episodes,
             "mean_follow_error_m": float(np.mean(errs)),
             "mean_survival_s": float(np.mean(durations)),
+            "collision_kinds": dict(kinds),
             "mean_action_change": float(np.mean(action_change)),
             "mean_accel_ms2": float(np.mean(accel)),
             "p95_accel_ms2": float(np.percentile(accel, 95))}
@@ -57,6 +62,12 @@ def main():
     ap.add_argument("--difficulties", type=int, nargs="+", default=[1, 2])
     ap.add_argument("--no-pedestrians", action="store_true")
     ap.add_argument("--skip-baselines", action="store_true", help="only score --model")
+    ap.add_argument("--smooth", type=float, nargs="*", default=[],
+                    help="also score --model with its commands low-passed, one per alpha (0-1, lower = smoother)")
+    ap.add_argument("--combo", nargs="*", default=[],
+                    help="smoothed + shielded, as ALPHA:DANGER (e.g. 0.5:2.0)")
+    ap.add_argument("--shield", type=float, nargs="*", default=[],
+                    help="also score --model wrapped in a reactive safety shield, one per danger distance")
     ap.add_argument("--out", default=None, help="write results to this JSON file")
     args = ap.parse_args()
 
@@ -64,6 +75,13 @@ def main():
                                                "reactive_follow": reactive_follow}
     if args.model:
         policies["ppo"] = load_ppo_policy(args.model)
+        for a in args.smooth:
+            policies[f"ppo~smooth{a:g}"] = smoothed(policies["ppo"], a)
+        for c in args.combo:
+            a, d = (float(x) for x in c.split(":"))
+            policies[f"ppo~{a:g}+shield{d:g}"] = blended(smoothed(policies["ppo"], a), d)
+        for d in args.shield:
+            policies[f"ppo+shield{d:g}"] = blended(policies["ppo"], d)
 
     results = {}
     print(f"{'policy':<16}{'level':>6}{'collisions':>12}{'follow err (m)':>16}{'survival (s)':>14}"
@@ -75,6 +93,8 @@ def main():
             print(f"{name:<16}{d:>6}{r['collision_rate']:>11.0%}"
                   f"{r['mean_follow_error_m']:>16.2f}{r['mean_survival_s']:>14.1f}"
                   f"{r['mean_action_change']:>12.3f}{r['p95_accel_ms2']:>11.2f}")
+            if r["collision_kinds"]:
+                print(f"{'':<22}crashes by cause: {r['collision_kinds']}")
     if args.out:
         with open(args.out, "w") as f:
             json.dump(results, f, indent=2)

@@ -21,7 +21,7 @@ import pybullet as p
 from drone_follow import config as C
 from drone_follow.drone_visual import DroneVisual
 from drone_follow.env import FollowAvoidAviary, SingleDroneWrapper
-from drone_follow.policies import naive_follow, reactive_follow
+from drone_follow.policies import naive_follow, reactive_follow, smoothed
 from drone_follow.render import status_from
 from drone_follow.scenario import Scenario
 
@@ -84,6 +84,8 @@ class Pacer:
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--model", default=None, help="trained PPO .zip (needed for policy 1)")
+    ap.add_argument("--smooth", type=float, default=0.0,
+                    help="low-pass the trained policy's commands (0 = off, 0.5 = recommended)")
     ap.add_argument("--difficulty", type=int, default=2)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--headless", type=int, default=0)
@@ -93,6 +95,8 @@ def main():
     if args.model:
         from drone_follow.evaluate import load_ppo_policy
         policies["trained"] = load_ppo_policy(args.model)
+        if args.smooth > 0:
+            policies["trained"] = smoothed(policies["trained"], args.smooth)
     current = "trained" if "trained" in policies else "reactive"
 
     gui = args.headless == 0

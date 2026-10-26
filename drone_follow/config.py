@@ -1,4 +1,5 @@
 """Shared constants for the follow-and-avoid environment (SI units, world frame)."""
+import os
 
 # Simulation rates
 PYB_FREQ = 240
@@ -37,3 +38,9 @@ TTC_START = 2.0            # s, penalty begins when predicted time to collision 
 R_CLEAR = 0.4              # penalty for being near any hazard surface
 CLEARANCE_START = 0.8      # m
 REWARD_SCALE = 0.1         # all rewards are multiplied by this, which keeps value targets small
+
+# Experiment switches (environment variables, so a trained model can be run with the same settings).
+# Both default to off, which reproduces the original behaviour.
+ACTION_RATE_LIMIT = float(os.environ.get("DF_ACTION_RATE_LIMIT", "0"))   # max change of the commanded action per control step (0 = off)
+R_TILT = float(os.environ.get("DF_R_TILT", "0"))                         # penalty for leaning toward a flip (0 = off)
+TILT_START = 0.35                                                        # rad, tilt penalty starts here (a flip is MAX_TILT)

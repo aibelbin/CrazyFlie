@@ -146,3 +146,36 @@ def test_hazard_terms_rise_for_a_hazard_on_a_collision_course():
     receding = sim._hazard_terms()
     assert approaching[0] > 0.5 and receding[0] == 0.0 and approaching[1] > 0.0
     env.close()
+
+
+def test_action_rate_limit_bounds_the_command_change(monkeypatch):
+    monkeypatch.setattr(C, "ACTION_RATE_LIMIT", 0.1)
+    env = make_env(difficulty=0, seed=3)()
+    env.reset(seed=3)
+    env.step(np.array([1.0, 0.0, 0.0]))                       # asks for a full jump from zero
+    assert env.unwrapped._prev_action[0] == pytest.approx(0.1)
+    for _ in range(30):
+        env.step(np.array([1.0, 0.0, 0.0]))
+    assert env.unwrapped._prev_action[0] == pytest.approx(1.0)  # still reaches full command, just gradually
+    env.close()
+
+
+def test_tilt_penalty_lowers_the_reward(monkeypatch):
+    monkeypatch.setattr(C, "R_TILT", 0.5)
+    env = make_env(difficulty=0, seed=4)()
+    env.reset(seed=4)
+    env.step(np.zeros(3))
+    sim = env.unwrapped
+    sim._tilt = 0.0
+    calm = sim._computeReward()
+    sim._tilt = 1.0
+    assert sim._computeReward() < calm
+    env.close()
+
+
+def test_smoothed_policy_moves_part_way():
+    from drone_follow.policies import smoothed
+    obs = np.zeros(64)
+    obs[13:16] = [0.2, 0.0, 0.0]                              # previous action
+    out = smoothed(lambda o: np.array([1.0, 0.0, 0.0]), 0.5)(obs)
+    assert out[0] == pytest.approx(0.6)

@@ -1,0 +1,46 @@
+{
+  "ppo/level1": {
+    "difficulty": 1,
+    "episodes": 100,
+    "collision_rate": 0.12,
+    "mean_follow_error_m": 0.32631705543540385,
+    "mean_survival_s": 18.45333333333333,
+    "collision_kinds": {
+      "flip": 11,
+      "debris": 1
+    },
+    "mean_action_change": 0.08694733181667581,
+    "mean_accel_ms2": 2.815027267535976,
+    "p95_accel_ms2": 7.018900442434395
+  },
+  "ppo/level2": {
+    "difficulty": 2,
+    "episodes": 100,
+    "collision_rate": 0.18,
+    "mean_follow_error_m": 0.32008657561763243,
+    "mean_survival_s": 18.150999999999996,
+    "collision_kinds": {
+      "rival": 1,
+      "debris": 4,
+      "flip": 13
+    },
+    "mean_action_change": 0.09234038894817714,
+    "mean_accel_ms2": 2.8710832123370813,
+    "p95_accel_ms2": 7.03461293939414
+  },
+  "ppo/level3": {
+    "difficulty": 3,
+    "episodes": 100,
+    "collision_rate": 0.17,
+    "mean_follow_error_m": 0.3051370402376338,
+    "mean_survival_s": 18.236666666666665,
+    "collision_kinds": {
+      "flip": 11,
+      "rival": 3,
+      "debris": 3
+    },
+    "mean_action_change": 0.10422693438770486,
+    "mean_accel_ms2": 2.9395939155238264,
+    "p95_accel_ms2": 7.055701679578178
+  }
+}
