@@ -13,13 +13,21 @@ STATUS_COLORS = {          # BGR
 }
 
 
-def render_frame(env, width: int = 640, height: int = 480, status: str = "", title: str = "") -> np.ndarray:
-    """BGR image from a camera hovering behind-and-above the drone/person pair."""
+def render_frame(env, width: int = 640, height: int = 480, status: str = "", title: str = "",
+                 cam: tuple | None = None) -> np.ndarray:
+    """BGR image from a camera hovering behind-and-above the drone/person pair.
+
+    `cam` = (azimuth_deg, elevation_deg, distance_m) orbits the pair; default is a fixed view.
+    """
     c = env.CLIENT
     drone = env.pos[0]
     person = env.scenario.target_point
     focus = 0.5 * (drone + person)
-    eye = focus + np.array([-4.5, -4.5, 3.2])
+    if cam is None:
+        eye = focus + np.array([-4.5, -4.5, 3.2])
+    else:
+        az, el, dist = np.radians(cam[0]), np.radians(cam[1]), cam[2]
+        eye = focus + dist * np.array([np.cos(el) * np.cos(az), np.cos(el) * np.sin(az), np.sin(el)])
     view = p.computeViewMatrix(eye.tolist(), focus.tolist(), [0, 0, 1], physicsClientId=c)
     proj = p.computeProjectionMatrixFOV(60.0, width / height, 0.1, 60.0, physicsClientId=c)
     _, _, rgba, _, _ = p.getCameraImage(width, height, view, proj,

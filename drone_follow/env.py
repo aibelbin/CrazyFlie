@@ -132,14 +132,37 @@ class FollowAvoidAviary(BaseRLAviary):
         return obs[None, :]
 
     # ---------------------------------------------------------------- reward
+    def _hazard_terms(self):
+        """(collision-course urgency, nearness) in [0, 1], from the simulator's true hazard state.
+
+        Used only to shape the training reward; the policy itself sees just the range strip.
+        """
+        pos, vel = self.pos[0], self.vel[0]
+        urgency, min_gap = 0.0, np.inf
+        for o in self._scenario.live_obstacles():
+            rel = o.pos - pos
+            dist = float(np.linalg.norm(rel)) + 1e-9
+            gap = dist - o.radius - C.DRONE_RADIUS
+            min_gap = min(min_gap, gap)
+            closing = -float(np.dot(rel / dist, o.vel - vel))      # > 0 when approaching
+            if closing > 0.05:
+                ttc = max(gap, 0.0) / closing
+                urgency = max(urgency, float(np.clip((C.TTC_START - ttc) / C.TTC_START, 0.0, 1.0)) ** 2)
+        nearness = 0.0
+        if np.isfinite(min_gap):
+            nearness = float(np.clip((C.CLEARANCE_START - min_gap) / C.CLEARANCE_START, 0.0, 1.0)) ** 2
+        return urgency, nearness
+
     def _computeReward(self):
         if self._crashed:
-            return C.R_COLLISION
+            return C.R_COLLISION * C.REWARD_SCALE
         follow = C.R_FOLLOW * (1.0 - min(abs(self._follow_dist - C.FOLLOW_DIST), 4.0) / 4.0)
         near = float(self._ranges.min())
         proximity = -C.R_PROXIMITY * np.clip((C.PROXIMITY_START - near) / 0.7, 0.0, 1.0) ** 2
+        urgency, nearness = self._hazard_terms()
         smooth = -C.R_SMOOTH * float(np.linalg.norm(self._action - self._prev_action))
-        return follow + proximity + smooth
+        total = follow + proximity - C.R_TTC * urgency - C.R_CLEAR * nearness + smooth
+        return total * C.REWARD_SCALE
 
     def _computeTerminated(self):
         return bool(self._crashed)

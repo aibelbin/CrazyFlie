@@ -31,6 +31,18 @@ pedestrians and rival drones. Click the window, then:
 Colours: person green, drone blue (with trail), debris grey, rival drones red.
 A label over the drone shows `FOLLOW TARGET`, `AVOIDING` or `COLLISION`.
 
+## Web viewer (watch it from a browser)
+
+```
+python -m drone_follow.web --model runs/ppo_ft/final.zip --port 8765
+```
+
+Streams the simulation as live video to any browser at `http://<machine>:8765`, with buttons for
+debris, rival drones, pedestrians, policy switching (trained / reactive / naive), difficulty, and
+camera orbit/zoom. It pauses about 8 s after the last viewer leaves, so an idle server costs
+nothing. There is no login: only expose it on a network you trust (e.g. a tailnet), or use an SSH
+tunnel: `ssh -L 18765:127.0.0.1:8765 <host>` then open `http://localhost:18765`.
+
 ## How it works
 
 ```
@@ -46,8 +58,10 @@ webcam / video --> YOLO (person) --> world position --+
   velocity and tilt, altitude, last action, a 24-ray range strip (8 azimuths x 3 elevations,
   6 m) and its rate of change.
 - **Action:** a 3-D velocity command (the library's PID controller flies the motors).
-- **Reward:** stay about 2 m from the person, `-50` and end the episode on a collision,
-  small penalties for getting close to obstacles and for jerky commands.
+- **Reward:** stay about 2 m from the person; end the episode on a collision; penalties for
+  getting close to obstacles, for a hazard on a collision course (time-to-collision) and for jerky
+  commands (all scaled by 0.1). The shaping was added after the first models in the table below, which
+  were trained with the simpler reward (proximity + smoothness only).
 - **Hazards:** spheres for debris and rival drones, three-sphere columns for pedestrians
   (drawn as walking figures in the live demo). The person and scenery are visual only.
 - **Difficulty levels:** 0 clear sky, 1 static debris, 2 drifting debris + pedestrians + a
@@ -80,6 +94,8 @@ clearly worse, so `ppo_ft` is the model to use; the cause was not investigated.
 | `drone_follow/sensing.py` | ray-cast range strip |
 | `drone_follow/policies.py` | naive and reactive baselines |
 | `drone_follow/train.py` | PPO training (curriculum, `--resume`, `--mix`) |
+| `drone_follow/train_long.py` | long run: shaped reward, mixed levels, best-checkpoint selection, time budget (remote machine only) |
+| `drone_follow/web.py` | browser viewer (MJPEG stream + controls) |
 | `drone_follow/evaluate.py` | collision rate / follow error on fixed seeds |
 | `drone_follow/live.py` | live 3-D demo |
 | `drone_follow/demo_sim.py` | side-by-side clips of policies on the same scenario |

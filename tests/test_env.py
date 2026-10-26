@@ -85,7 +85,7 @@ def test_flying_into_debris_is_a_terminal_collision():
         _, r, term, _, info = env.step(np.array([1.0, 0.0, 0.0]))
         if term:
             break
-    assert term and info["collision"] and r == C.R_COLLISION
+    assert term and info["collision"] and r == C.R_COLLISION * C.REWARD_SCALE
     env.close()
 
 
@@ -131,3 +131,18 @@ def test_key_char_handles_special_and_unknown_keys():
     assert key_char(ord("o")) == "o" and key_char(ord("3")) == "3"
     for weird in (-1, 0, 27, 65296, 2**40, -2**31):          # arrows, shift, unknown codes
         assert key_char(weird) == ""
+
+
+def test_hazard_terms_rise_for_a_hazard_on_a_collision_course():
+    env = make_env(difficulty=0, seed=6)()
+    env.reset(seed=6)
+    sim = env.unwrapped
+    env.step(np.zeros(3))
+    assert sim._hazard_terms() == (0.0, 0.0)                       # empty sky
+    ahead = sim.pos[0] + [1.0, 0.0, 0.0]
+    sim.scenario.obstacles.append(Obstacle(ahead.copy(), np.array([-2.0, 0, 0]), 0.2, "rival"))
+    approaching = sim._hazard_terms()
+    sim.scenario.obstacles[-1].vel = np.array([2.0, 0, 0])          # same place, flying away
+    receding = sim._hazard_terms()
+    assert approaching[0] > 0.5 and receding[0] == 0.0 and approaching[1] > 0.0
+    env.close()
