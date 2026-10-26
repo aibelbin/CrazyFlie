@@ -34,13 +34,17 @@ A label over the drone shows `FOLLOW TARGET`, `AVOIDING` or `COLLISION`.
 ## Web viewer (watch it from a browser)
 
 ```
-python -m drone_follow.web --model runs/ppo_ft/final.zip --port 8765
+python -m drone_follow.web --model runs/ppo_ft/final.zip --port 8765 --runs-dir runs --runs long_a,long_b
 ```
 
-Streams the simulation as live video to any browser at `http://<machine>:8765`, with buttons for
-debris, rival drones, pedestrians, policy switching (trained / reactive / naive), difficulty, and
-camera orbit/zoom. It pauses about 8 s after the last viewer leaves, so an idle server costs
-nothing. There is no login: only expose it on a network you trust (e.g. a tailnet), or use an SSH
+Open `http://<machine>:8765`:
+- `/` is a **training dashboard**: for each run, a live episode from one training worker (sped up,
+  exploring) plus steps, speed, ETA, training collision rate, average reward and a chart of the
+  periodic evaluation scores against the hand-written baseline. The worker only renders while the
+  page is open.
+- `/play` streams a finished model in its own simulation, with buttons for debris, rival drones,
+  pedestrians, policy switching (trained / reactive / naive), difficulty and camera orbit/zoom.
+  It pauses about 8 s after the last viewer leaves, so an idle server costs nothing. There is no login: only expose it on a network you trust (e.g. a tailnet), or use an SSH
 tunnel: `ssh -L 18765:127.0.0.1:8765 <host>` then open `http://localhost:18765`.
 
 ## How it works

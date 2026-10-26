@@ -1,14 +1,20 @@
-"""Web viewer: the simulation streamed to a browser, with buttons to add hazards.
+"""Web viewer.
 
-    python -m drone_follow.web --model runs/ppo_ft/final.zip --port 8080
-    # then open http://<this machine>:8080  (e.g. its Tailscale address)
+    python -m drone_follow.web --model runs/ppo_ft/final.zip --port 8765 \
+        --runs-dir runs --runs long_a,long_b
+    # then open http://<this machine>:8765
 
-The simulation runs headless and is rendered on the CPU. It pauses a few seconds after the last
-viewer leaves, so an idle server costs almost nothing. There is no login: only expose the port
-on a network you trust (e.g. a tailnet).
+  /       training dashboard: each run's live training episode plus progress and score charts
+  /play   a finished model flying in its own simulation, with buttons to add hazards
+
+The training frames come from one worker per run, which only renders while this page is open
+(it checks a `watch` file this server touches). The /play simulation pauses a few seconds after
+its last viewer leaves, so an idle server costs almost nothing. There is no login: only expose
+the port on a network you trust (e.g. a tailnet).
 """
 import argparse
 import json
+import os
 import queue
 import threading
 import time
@@ -26,25 +32,35 @@ IDLE_AFTER_S = 8.0
 FRAME_W, FRAME_H = 800, 450
 RENDER_EVERY = 2                      # render every 2nd 30 Hz control step (15 fps)
 
-PAGE = """<!doctype html><html><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Drone follow and avoid</title>
-<style>
- :root{color-scheme:dark light;--bg:#0f1115;--fg:#e8eaed;--card:#1a1d24;--acc:#4c8dff;--mut:#9aa0a6}
- @media (prefers-color-scheme:light){:root{--bg:#f4f5f7;--fg:#1c1e22;--card:#fff;--acc:#1a5fe0;--mut:#5f6368}}
+STYLE = """
+ :root{color-scheme:dark light;--bg:#0f1115;--fg:#e8eaed;--card:#1a1d24;--acc:#4c8dff;--mut:#9aa0a6;
+  --a:#ff7a59;--b:#4cc38a}
+ @media (prefers-color-scheme:light){:root{--bg:#f4f5f7;--fg:#1c1e22;--card:#fff;--acc:#1a5fe0;--mut:#5f6368;
+  --a:#d4491f;--b:#1a8f5a}}
  body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.4 system-ui,sans-serif}
- main{max-width:920px;margin:0 auto;padding:16px}
- h1{font-size:18px;margin:0 0 10px}
+ main{max-width:1100px;margin:0 auto;padding:16px}
+ h1{font-size:18px;margin:0 0 4px} h2{font-size:16px;margin:0 0 8px}
+ a{color:var(--acc)} .mut{color:var(--mut)}
  img{width:100%;border-radius:10px;background:#000;display:block}
  .row{display:flex;flex-wrap:wrap;gap:8px;margin:10px 0}
  button,select{background:var(--card);color:var(--fg);border:1px solid #8884;border-radius:8px;
    padding:9px 12px;font:inherit}
- button:active{background:var(--acc);color:#fff}
- .on{outline:2px solid var(--acc)}
+ button:active{background:var(--acc);color:#fff} .on{outline:2px solid var(--acc)}
  label{color:var(--mut);display:flex;align-items:center;gap:6px}
- #st{color:var(--mut);margin-top:6px}
-</style></head><body><main>
-<h1>Drone follow-and-avoid <span id="st"></span></h1>
+ .grid{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+ @media (max-width:800px){.grid{grid-template-columns:1fr}}
+ .card{background:var(--card);border-radius:12px;padding:12px}
+ .bar{height:10px;border-radius:6px;background:#8883;overflow:hidden;margin:6px 0}
+ .bar>i{display:block;height:100%;background:var(--acc)}
+ .kv{display:grid;grid-template-columns:auto auto;gap:2px 14px;justify-content:start;margin:8px 0}
+ .kv b{font-weight:600} canvas{width:100%;height:170px;display:block}
+"""
+
+PLAY_PAGE = """<!doctype html><html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Drone follow and avoid: play</title><style>%STYLE%</style></head><body><main>
+<h1>Finished model <span id="st" class="mut"></span></h1>
+<div class="mut"><a href="/">&larr; training dashboard</a></div>
 <img id="v" src="/stream" alt="live simulation">
 <div class="row">
  <button onclick="act('debris')">Drop debris</button>
@@ -77,11 +93,67 @@ async function poll(){
  }catch(e){}
  setTimeout(poll,1000)}
 poll();
+</script></main></body></html>""".replace("%STYLE%", STYLE)
+
+DASH_PAGE = """<!doctype html><html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Drone training dashboard</title><style>%STYLE%</style></head><body><main>
+<h1>Drone follow-and-avoid: training</h1>
+<div class="mut">Live episodes from one training worker per run (random exploration early on, sped up),
+ plus scores on fixed unseen scenarios. <a href="/play">Watch a finished model</a></div>
+<div class="grid" id="runs" style="margin-top:12px"></div>
+<script>
+const RUNS=%RUNS%, COL=['var(--a)','var(--b)'];
+const BASE={L2:0.02,L3:0.12};   // hand-written reactive baseline, collision rate
+const fmt=(x,d=1)=>x==null?'–':x.toFixed(d), pct=x=>x==null?'–':(100*x).toFixed(0)+'%';
+const hrs=h=>h==null?'–':(h<1?Math.round(h*60)+' min':h.toFixed(1)+' h');
+document.getElementById('runs').innerHTML=RUNS.map((r,i)=>`
+ <div class="card"><h2 style="color:${COL[i%2]}">${r.title}</h2>
+  <img src="/train/${r.id}/stream" alt="live training episode">
+  <div class="bar"><i id="bar-${r.id}" style="width:0%"></i></div>
+  <div class="kv" id="kv-${r.id}"></div>
+  <canvas id="ch-${r.id}" width="600" height="220"></canvas>
+  <div class="mut" id="best-${r.id}"></div></div>`).join('');
+
+function chart(id,evals,total,color){
+ const c=document.getElementById('ch-'+id),g=c.getContext('2d'),W=c.width,H=c.height,P=34;
+ g.clearRect(0,0,W,H);g.font='12px system-ui';g.fillStyle=getComputedStyle(document.body).color;
+ const ymax=Math.max(0.5,...evals.map(e=>Math.max(e.L2_collision,e.L3_collision)))*1.05;
+ const X=s=>P+(W-P-8)*s/total,Y=v=>H-P+4-(H-P-14)*v/ymax;
+ g.globalAlpha=.35;g.strokeStyle=g.fillStyle;g.beginPath();g.moveTo(P,10);g.lineTo(P,H-P+4);g.lineTo(W-6,H-P+4);g.stroke();
+ for(let v=0;v<=ymax;v+=0.1){g.fillText(Math.round(v*100)+'%',2,Y(v)+4)}
+ g.globalAlpha=1;g.fillText('training steps',W/2-30,H-6);g.fillText((total/1e6)+'M',W-34,H-P+18);
+ for(const [k,key,dash] of [['L2','L2_collision',[]],['L3','L3_collision',[5,4]]]){
+  g.strokeStyle=color;g.lineWidth=2;g.setLineDash(dash);g.beginPath();
+  evals.forEach((e,j)=>{const x=X(e.steps),y=Y(e[key]);j?g.lineTo(x,y):g.moveTo(x,y)});g.stroke();
+  g.setLineDash([2,5]);g.globalAlpha=.5;g.lineWidth=1;g.beginPath();g.moveTo(P,Y(BASE[k]));g.lineTo(W-6,Y(BASE[k]));g.stroke();g.globalAlpha=1}
+ g.setLineDash([]);g.fillText('solid = level 2 · dashed = level 3 · dotted = hand-written baseline',P+4,H-18)}
+
+async function poll(){
+ for(const r of RUNS){
+  try{const d=await (await fetch('/train/'+r.id+'/progress')).json(),p=d.progress||{};
+   document.getElementById('bar-'+r.id).style.width=(p.pct||0)+'%';
+   const lag=p.updated_at?Math.round(Date.now()/1000-p.updated_at):null;
+   document.getElementById('kv-'+r.id).innerHTML=
+    `<span class="mut">steps</span><b>${fmt((p.steps||0)/1e6,2)}M / ${fmt((p.total||0)/1e6,0)}M (${fmt(p.pct,1)}%)</b>
+     <span class="mut">speed</span><b>${fmt(p.sps,0)} steps/s</b>
+     <span class="mut">time</span><b>${hrs(p.elapsed_h)} in · ETA ${hrs(p.eta_h)} (limit ${hrs(p.budget_h)})</b>
+     <span class="mut">stage</span><b>${p.phase||'–'}</b>
+     <span class="mut">training collisions</span><b>${pct(p.train_collision_rate)} of last ${p.n_recent||0} episodes</b>
+     <span class="mut">avg reward / length</span><b>${fmt(p.ep_reward,1)} / ${fmt(p.ep_len_s,1)} s</b>
+     <span class="mut">status</span><b>${lag==null?'waiting for first update':(lag>90?'STALE: no update for '+lag+' s':'running')}</b>`;
+   chart(r.id,d.evals||[],p.total||65e6,COL[RUNS.indexOf(r)%2]);
+   const b=d.best;document.getElementById('best-'+r.id).textContent=b?
+    `best so far (step ${fmt(b.steps/1e6,1)}M): level 2 ${pct(b.L2_collision)}, level 3 ${pct(b.L3_collision)} collisions`:'no evaluation yet (first at 1M steps)';
+  }catch(e){}
+ }
+ setTimeout(poll,3000)}
+poll();
 </script></main></body></html>"""
 
 
 class Sim:
-    """Owns the simulation. Only its own thread touches PyBullet; handlers send commands."""
+    """Owns the /play simulation. Only its own thread touches PyBullet; handlers send commands."""
 
     def __init__(self, policies: dict, current: str, difficulty: int, seed: int):
         self.policies, self.current = policies, current
@@ -89,7 +161,7 @@ class Sim:
         self.cmds: queue.Queue = queue.Queue()
         self.cond = threading.Condition()
         self.jpeg, self.frame_no = b"", 0
-        self.last_seen = time.time()
+        self.last_seen = 0.0                      # starts idle until someone opens /play
         self.cam = (225.0, 27.0, 7.0)
         self.status, self.episodes, self.collisions = "STARTING", 0, 0
 
@@ -155,7 +227,32 @@ class Sim:
             time.sleep(max(0.0, 1.0 / C.CTRL_FREQ - (time.perf_counter() - t0)))
 
 
-def make_handler(sim: Sim):
+def read_json(path: str):
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return None
+
+
+def read_jsonl(path: str) -> list:
+    out = []
+    try:
+        with open(path) as f:
+            for line in f:
+                try:
+                    out.append(json.loads(line))
+                except ValueError:
+                    pass
+    except OSError:
+        pass
+    return out
+
+
+def make_handler(sim: Sim, runs_dir: str, runs: list):
+    run_ids = {r["id"] for r in runs}
+    dash_page = DASH_PAGE.replace("%STYLE%", STYLE).replace("%RUNS%", json.dumps(runs))
+
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *a):
             pass
@@ -168,24 +265,36 @@ def make_handler(sim: Sim):
             self.end_headers()
             self.wfile.write(body)
 
+        def _mjpeg_headers(self):
+            self.send_response(200)
+            self.send_header("Content-Type", "multipart/x-mixed-replace; boundary=frame")
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+
+        def _frame(self, jpeg: bytes):
+            self.wfile.write(b"--frame\r\nContent-Type: image/jpeg\r\nContent-Length: "
+                             + str(len(jpeg)).encode() + b"\r\n\r\n" + jpeg + b"\r\n")
+
         def do_GET(self):
-            sim.touch()
             path = self.path.split("?")[0]
+            parts = path.strip("/").split("/")
             if path == "/":
-                self._send(200, PAGE.encode(), "text/html; charset=utf-8")
+                self._send(200, dash_page.encode(), "text/html; charset=utf-8")
+            elif path == "/play":
+                sim.touch()
+                self._send(200, PLAY_PAGE.encode(), "text/html; charset=utf-8")
             elif path == "/api/state":
+                sim.touch()
                 self._send(200, json.dumps({
                     "status": sim.status, "policy": sim.current, "episodes": sim.episodes,
                     "collisions": sim.collisions}).encode())
             elif path == "/snapshot.jpg":
+                sim.touch()
                 with sim.cond:
                     sim.cond.wait_for(lambda: sim.frame_no > 0, timeout=15)
                 self._send(200 if sim.jpeg else 503, sim.jpeg, "image/jpeg")
             elif path == "/stream":
-                self.send_response(200)
-                self.send_header("Content-Type", "multipart/x-mixed-replace; boundary=frame")
-                self.send_header("Cache-Control", "no-store")
-                self.end_headers()
+                self._mjpeg_headers()
                 last = -1
                 try:
                     while True:
@@ -194,8 +303,41 @@ def make_handler(sim: Sim):
                             jpeg, last = sim.jpeg, sim.frame_no
                         sim.touch()
                         if jpeg:
-                            self.wfile.write(b"--frame\r\nContent-Type: image/jpeg\r\nContent-Length: "
-                                             + str(len(jpeg)).encode() + b"\r\n\r\n" + jpeg + b"\r\n")
+                            self._frame(jpeg)
+                except (BrokenPipeError, ConnectionResetError):
+                    pass
+            elif len(parts) == 3 and parts[0] == "train" and parts[1] in run_ids and parts[2] == "progress":
+                d = os.path.join(runs_dir, parts[1])
+                self._send(200, json.dumps({
+                    "progress": read_json(os.path.join(d, "progress.json")),
+                    "evals": read_jsonl(os.path.join(d, "eval_log.jsonl")),
+                    "best": read_json(os.path.join(d, "best.json"))}).encode())
+            elif len(parts) == 3 and parts[0] == "train" and parts[1] in run_ids and parts[2] == "stream":
+                d = os.path.join(runs_dir, parts[1])
+                flag, live = os.path.join(d, "watch"), os.path.join(d, "live.jpg")
+                self._mjpeg_headers()
+                last_m, last_flag = 0.0, 0.0
+                try:
+                    while True:
+                        now = time.time()
+                        if now - last_flag > 2.0:          # tells the training worker to render
+                            try:
+                                with open(flag, "w") as f:
+                                    f.write(str(now))
+                            except OSError:
+                                pass
+                            last_flag = now
+                        try:
+                            m = os.path.getmtime(live)
+                        except OSError:
+                            m = 0.0
+                        if m and m != last_m:
+                            with open(live, "rb") as f:
+                                data = f.read()
+                            last_m = m
+                            if data:
+                                self._frame(data)
+                        time.sleep(0.08)
                 except (BrokenPipeError, ConnectionResetError):
                     pass
             else:
@@ -224,11 +366,13 @@ def make_handler(sim: Sim):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--model", default=None, help="trained PPO .zip")
+    ap.add_argument("--model", default=None, help="trained PPO .zip for /play")
     ap.add_argument("--host", default="0.0.0.0")
-    ap.add_argument("--port", type=int, default=8080)
+    ap.add_argument("--port", type=int, default=8765)
     ap.add_argument("--difficulty", type=int, default=2)
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--runs-dir", default="runs", help="folder containing the training run folders")
+    ap.add_argument("--runs", default="", help="comma list of run folder names to show, e.g. long_a,long_b")
     args = ap.parse_args()
 
     policies = {"reactive": reactive_follow, "naive": naive_follow}
@@ -237,8 +381,9 @@ def main():
         policies["trained"] = load_ppo_policy(args.model)
     sim = Sim(policies, "trained" if "trained" in policies else "reactive", args.difficulty, args.seed)
     threading.Thread(target=sim.run, daemon=True).start()
-    server = ThreadingHTTPServer((args.host, args.port), make_handler(sim))
-    print(f"serving on http://{args.host}:{args.port}  (policy: {sim.current})", flush=True)
+    runs = [{"id": r, "title": f"Run {r.split('_')[-1].upper()}  ({r})"} for r in args.runs.split(",") if r]
+    server = ThreadingHTTPServer((args.host, args.port), make_handler(sim, args.runs_dir, runs))
+    print(f"serving on http://{args.host}:{args.port}  runs={[r['id'] for r in runs]}", flush=True)
     try:
         server.serve_forever()
     except KeyboardInterrupt:

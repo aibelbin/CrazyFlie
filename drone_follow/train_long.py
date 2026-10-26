@@ -15,6 +15,7 @@ import argparse
 import json
 import os
 import time
+from collections import deque
 
 import numpy as np
 import torch
@@ -107,6 +108,69 @@ class BestByCollisions(BaseCallback):
               flush=True)
 
 
+class LatestSaver(BaseCallback):
+    """Saves latest.zip often, so a viewer or a resume never loses much."""
+
+    def __init__(self, out: str, every: int = 250_000):
+        super().__init__()
+        self.out, self.every, self.last = out, every, 0
+
+    def _on_step(self) -> bool:
+        if self.num_timesteps - self.last >= self.every:
+            self.last = self.num_timesteps
+            self.model.save(os.path.join(self.out, "latest.zip"))
+        return True
+
+
+class ProgressWriter(BaseCallback):
+    """Writes progress.json every ~20 s for the web dashboard."""
+
+    def __init__(self, out: str, total: int, max_hours: float, every_s: float = 20.0, window: int = 200):
+        super().__init__()
+        self.out, self.total, self.max_hours, self.every_s = out, total, max_hours, every_s
+        self.recent = deque(maxlen=window)
+        self.t_start = self.t_last = time.time()
+        self.steps_last, self.sps = 0, 0.0
+
+    def _on_training_start(self):
+        self.t_start = self.t_last = time.time()
+        self.steps_last = self.num_timesteps
+
+    def _on_step(self) -> bool:
+        for info, done in zip(self.locals["infos"], self.locals["dones"]):
+            if done:
+                self.recent.append(int(info.get("collision", False)))
+        now = time.time()
+        if now - self.t_last >= self.every_s:
+            rate = (self.num_timesteps - self.steps_last) / (now - self.t_last)
+            self.sps = rate if self.sps == 0 else 0.7 * self.sps + 0.3 * rate
+            self.t_last, self.steps_last = now, self.num_timesteps
+            self._write(now)
+        return True
+
+    def _write(self, now: float):
+        buf = self.model.ep_info_buffer
+        left = self.total - self.num_timesteps
+        data = {
+            "steps": int(self.num_timesteps), "total": int(self.total),
+            "pct": 100.0 * self.num_timesteps / self.total,
+            "sps": self.sps,
+            "elapsed_h": (now - self.t_start) / 3600,
+            "eta_h": left / self.sps / 3600 if self.sps > 0 else None,
+            "budget_h": self.max_hours,
+            "phase": "warm-up mix" if self.num_timesteps < WARMUP_STEPS else "main mix",
+            "train_collision_rate": float(np.mean(self.recent)) if self.recent else None,
+            "n_recent": len(self.recent),
+            "ep_reward": float(np.mean([e["r"] for e in buf])) if len(buf) else None,
+            "ep_len_s": float(np.mean([e["l"] for e in buf])) / C.CTRL_FREQ if len(buf) else None,
+            "updated_at": now,
+        }
+        tmp = os.path.join(self.out, "progress.json.tmp")
+        with open(tmp, "w") as f:
+            json.dump(data, f)
+        os.replace(tmp, os.path.join(self.out, "progress.json"))
+
+
 class TimeBudget(BaseCallback):
     def __init__(self, hours: float):
         super().__init__()
@@ -141,8 +205,13 @@ def main():
     def lr_schedule(progress_remaining: float) -> float:
         return args.lr_end + (args.lr_start - args.lr_end) * progress_remaining
 
+    spectate = dict(path=os.path.join(args.out, "live.jpg"),
+                    label=f"{os.path.basename(os.path.normpath(args.out))} worker",
+                    progress_path=os.path.join(args.out, "progress.json"))
     venv = VecMonitor(SubprocVecEnv(
-        [make_env(difficulty=2, seed=args.seed * 1000 + i) for i in range(args.envs)]))
+        [make_env(difficulty=2, seed=args.seed * 1000 + i,
+                  spectate=spectate if i == 2 else None)     # worker 2 is level 2 in both mixes
+         for i in range(args.envs)]))
     n_steps = 2048
     batch = min(2048, n_steps * args.envs // 4)
     if args.resume:
@@ -162,13 +231,14 @@ def main():
     callbacks = [
         CollisionRate(), PhaseMixer(args.envs),
         BestByCollisions(args.out, args.eval_every, args.eval_episodes),
+        LatestSaver(args.out), ProgressWriter(args.out, args.total_steps, args.max_hours),
         CheckpointCallback(save_freq=max(1, 5_000_000 // args.envs), save_path=args.out,
                            name_prefix="ckpt"),
         TimeBudget(args.max_hours),
     ]
     model.learn(remaining, reset_num_timesteps=False, callback=callbacks, tb_log_name="long")
     model.save(os.path.join(args.out, "final"))
-    callbacks[2].run_eval()                  # score the final policy too
+    callbacks[2].run_eval()                  # score the final policy too (index of BestByCollisions)
     venv.close()
     print("training complete", flush=True)
 
