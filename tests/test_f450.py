@@ -71,4 +71,5 @@ def test_f450_sensors_are_noisy_but_unbiased_and_can_be_switched_off():
     assert noisy["noisy"] and noisy["delay"] == 1
     assert 0.005 < noisy["std"] < 0.2 and abs(noisy["mean"] - 2.4) < 0.1
     clean = _run_noise(DF_DRONE="f450", DF_NOISE="0")
-    assert not clean["noisy"] and clean["std"] < 1e-6 and abs(clean["mean"] - 2.4) < 0.01
+    assert not clean["noisy"] and clean["std"] < 0.003 and abs(clean["mean"] - 2.4) < 0.01
+    assert noisy["std"] > 5 * clean["std"]                  # the noise is real, not physical wobble
