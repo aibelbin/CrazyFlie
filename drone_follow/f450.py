@@ -125,6 +125,9 @@ class F450Mixin:
         self._f450 = True
         self._wind = wind
 
+    def _f450_set_wind(self, wind: WindField | None):
+        self._wind = wind
+
     def _f450_reset(self):
         self._fc = None
         self._v_target = np.zeros(3)

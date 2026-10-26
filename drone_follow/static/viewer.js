@@ -38,6 +38,8 @@ sun.shadow.bias = -0.0004; sun.shadow.normalBias = 0.03;
 scene.add(sun, sun.target);
 
 const world = new THREE.Group(); world.rotation.x = -Math.PI / 2; scene.add(world);   // sim z-up -> y-up
+const scenery = new THREE.Group(); world.add(scenery);          // the flat-level backdrop (hidden when terrain is shown)
+const terrainGroup = new THREE.Group(); world.add(terrainGroup);   // hills, trees and rocks of levels 4-5
 
 /* ---------- deterministic random so the scenery is identical on every load ---------- */
 function rng(seed) { let s = seed >>> 0; return () => ((s = Math.imul(s ^ (s >>> 15), 2246822507) + 0x9e3779b9 >>> 0) / 4294967296); }
@@ -58,16 +60,16 @@ function grassTexture() {
 }
 const ground = new THREE.Mesh(new THREE.PlaneGeometry(600, 600),
   new THREE.MeshStandardMaterial({map: grassTexture(), roughness: 1}));
-ground.receiveShadow = true; world.add(ground);
+ground.receiveShadow = true; scenery.add(ground);
 
 /* a lighter mowed arena, with corner posts, so the flying area reads clearly */
 const arena = new THREE.Mesh(new THREE.PlaneGeometry(16, 16),
   new THREE.MeshStandardMaterial({color: 0x6e9a48, roughness: 1, transparent: true, opacity: .5}));
-arena.position.z = 0.01; arena.receiveShadow = true; world.add(arena);
+arena.position.z = 0.01; arena.receiveShadow = true; scenery.add(arena);
 for (const [x, y] of [[-8, -8], [-8, 8], [8, -8], [8, 8]]) {
   const post = new THREE.Mesh(new THREE.CylinderGeometry(0.05, 0.05, 2, 10),
     new THREE.MeshStandardMaterial({color: 0xf2b705, roughness: .5}));
-  post.rotation.x = Math.PI / 2; post.position.set(x, y, 1); post.castShadow = true; world.add(post);
+  post.rotation.x = Math.PI / 2; post.position.set(x, y, 1); post.castShadow = true; scenery.add(post);
 }
 
 /* ---------- scenery: forest, rocks, hills, buildings (visual only) ---------- */
@@ -85,7 +87,7 @@ function cylZ(rt, rb, h, seg, mat) {          // cylinder standing along sim +z
   m.rotation.x = Math.PI / 2; m.castShadow = m.receiveShadow = true; return m;
 }
 function coneZ(r, h, seg, mat) { return cylZ(0, r, h, seg, mat); }
-function tree(x, y, kind, s) {
+function tree(x, y, kind, s, z0 = 0, target = scenery) {
   const g = new THREE.Group();
   if (kind === 'pine') {
     const th = 1.0 * s; const t = cylZ(.13 * s, .18 * s, th, 8, mats.trunk); t.position.z = th / 2; g.add(t);
@@ -100,15 +102,15 @@ function tree(x, y, kind, s) {
       b.castShadow = b.receiveShadow = true; g.add(b);
     }
   }
-  g.position.set(x, y, 0); g.rotation.y = R() * 6.28; world.add(g);
+  g.position.set(x, y, 0); g.rotation.y = R() * 6.28; target.add(g);
 }
-function rock(x, y, r) {
+function rock(x, y, r, z0 = r * .3, target = scenery) {
   const geo = new THREE.IcosahedronGeometry(r, 1), pos = geo.attributes.position, rr = rng((x * 73 + y * 31) | 0);
   for (let i = 0; i < pos.count; i++) { const k = .78 + rr() * .4; pos.setXYZ(i, pos.getX(i) * k, pos.getY(i) * k, pos.getZ(i) * k * .75); }
   geo.computeVertexNormals();
-  const m = new THREE.Mesh(geo, mats.rock); m.position.set(x, y, r * .3); m.castShadow = m.receiveShadow = true; world.add(m);
+  const m = new THREE.Mesh(geo, mats.rock); m.position.set(x, y, z0); m.castShadow = m.receiveShadow = true; target.add(m);
 }
-function building(x, y, w, d, h) {
+function building(x, y, w, d, h) { const target = scenery;
   const g = new THREE.Group(), body = new THREE.Mesh(new THREE.BoxGeometry(w, d, h), mats.wall[(R() * 4) | 0]);
   body.position.z = h / 2; body.castShadow = body.receiveShadow = true; g.add(body);
   const roof = new THREE.Mesh(new THREE.BoxGeometry(w + .4, d + .4, .3), mats.roof); roof.position.z = h + .15; roof.castShadow = true; g.add(roof);
@@ -116,12 +118,12 @@ function building(x, y, w, d, h) {
     const wd = new THREE.Mesh(new THREE.BoxGeometry(.7, .05, .9), mats.glass);
     wd.position.set(-w / 2 + .9 + i * 1.6, -d / 2 - .02, f * 2.2 - .3); g.add(wd);
   }
-  g.position.set(x, y, 0); g.rotation.z = R() * 6.28; world.add(g);
+  g.position.set(x, y, 0); g.rotation.z = R() * 6.28; target.add(g);
 }
-function hill(x, y, r, h, col) {
+function hill(x, y, r, h, col) { const target = scenery;
   const m = new THREE.Mesh(new THREE.SphereGeometry(r, 28, 14, 0, Math.PI * 2, 0, Math.PI / 2),
     new THREE.MeshStandardMaterial({color: col, roughness: 1, flatShading: true}));
-  m.rotation.x = Math.PI / 2; m.scale.set(1, h / r, 1); m.position.set(x, y, 0); m.receiveShadow = true; world.add(m);
+  m.rotation.x = Math.PI / 2; m.scale.set(1, h / r, 1); m.position.set(x, y, 0); m.receiveShadow = true; target.add(m);
 }
 (() => {
   for (let k = 0; k < 70; k++) {              // forest ring outside the arena
@@ -230,6 +232,36 @@ trail.frustumCulled = false; world.add(trail);
 
 function clearDynamic() { for (const o of objs.values()) dyn.remove(o); objs.clear(); trailPts = []; trail.geometry.setFromPoints([]); }
 
+/* ---------- terrain, trees and rocks of levels 4-5 (fetched once per episode) ---------- */
+function buildWorld(w) {
+  while (terrainGroup.children.length) terrainGroup.remove(terrainGroup.children[0]);
+  scenery.visible = !w.terrain;
+  scene.fog.far = w.terrain ? 260 : 190;
+  if (!w.terrain) return;
+  const {half, n, z} = w.terrain, geo = new THREE.PlaneGeometry(2 * half, 2 * half, n - 1, n - 1), pos = geo.attributes.position;
+  for (let iy = 0; iy < n; iy++) for (let ix = 0; ix < n; ix++) pos.setZ(iy * n + ix, z[(n - 1 - iy) * n + ix]);
+  geo.computeVertexNormals();
+  const nrm = geo.attributes.normal, col = new Float32Array(pos.count * 3), c = new THREE.Color(), r = rng(5);
+  for (let i = 0; i < pos.count; i++) {
+    const h = pos.getZ(i), slope = 1 - nrm.getZ(i), jit = (r() - .5) * .05;
+    c.setRGB(.27 + jit, .46 + jit, .2 + jit);                                        // grass
+    if (slope > .12) c.lerp(new THREE.Color(.42, .36, .27), Math.min((slope - .12) * 4, 1));   // dirt on slopes
+    if (h > 9) c.lerp(new THREE.Color(.46, .46, .45), Math.min((h - 9) / 6, 1));               // rock
+    if (h > 22) c.lerp(new THREE.Color(.95, .96, .98), Math.min((h - 22) / 6, 1));            // snow
+    col.set([c.r, c.g, c.b], i * 3);
+  }
+  geo.setAttribute('color', new THREE.BufferAttribute(col, 3));
+  const mesh = new THREE.Mesh(geo, new THREE.MeshStandardMaterial({vertexColors: true, roughness: 1}));
+  mesh.receiveShadow = true; terrainGroup.add(mesh);
+  const groups = new Map();
+  for (const o of w.statics) { if (!groups.has(o.g)) groups.set(o.g, []); groups.get(o.g).push(o); }
+  for (const [g, list] of groups) {
+    if (list[0].k === 'rock') { const o = list[0]; rock(o.p[0], o.p[1], o.r, o.p[2], terrainGroup); }
+    else { const base = list[0]; tree(base.p[0], base.p[1], g % 3 ? 'pine' : 'oak', g % 3 ? .75 : 1.0, base.p[2] - .45, terrainGroup); }
+  }
+}
+function loadWorld() { fetch('/api/world').then(r => r.json()).then(buildWorld).catch(() => {}); }
+
 /* ---------- state buffer + interpolation ---------- */
 const buf = [];
 let episode = -1, lastFrameT = performance.now();
@@ -255,10 +287,11 @@ function applyState(a, b, k, dt) {
   const speed = Math.hypot(...a.drone.v), rpm = 50 + Math.min(speed, 2.5) * 12;
   for (const p of drone.userData.props) { p.rotation.z += p.userData.dir * rpm * dt; p.userData.disc.material.opacity = .13; }
   const pp = [lerp(a.person.p[0], b.person.p[0], k), lerp(a.person.p[1], b.person.p[1], k)];
-  personFigure.position.set(pp[0], pp[1], 0);
+  const pg = lerp(a.person.gz || 0, b.person.gz || 0, k), dg = lerp(a.drone.gz || 0, b.drone.gz || 0, k);
+  personFigure.position.set(pp[0], pp[1], pg);
   animateWalker(personFigure, a.person.v[0], a.person.v[1], dt);
-  ring.position.x = pp[0]; ring.position.y = pp[1];
-  droneShadowBlob.position.set(dp[0], dp[1], .02); const h = Math.max(dp[2], .05);
+  ring.position.set(pp[0], pp[1], pg + .03);
+  droneShadowBlob.position.set(dp[0], dp[1], dg + .02); const h = Math.max(dp[2] - dg, .05);
   droneShadowBlob.scale.setScalar(1 + h * .25); droneShadowBlob.material.opacity = Math.max(.04, .2 - h * .05);
 
   const seen = new Set(), bmap = new Map(b.obs.map(o => [o.id, o]));
@@ -270,7 +303,7 @@ function applyState(a, b, k, dt) {
       if (Math.abs(oa.p[2] - 0.3) > 1e-3) continue;               // one figure per group, driven by its lowest sphere
       const key = 'ped' + oa.g; seen.add(key);
       let w = objs.get(key); if (!w) { w = makeWalker(SHIRTS[oa.g % 4]); dyn.add(w); objs.set(key, w); }
-      w.position.set(pos[0], pos[1], 0); animateWalker(w, oa.v[0], oa.v[1], dt); continue;
+      w.position.set(pos[0], pos[1], pos[2] - 0.3); animateWalker(w, oa.v[0], oa.v[1], dt); continue;
     }
     const key = 'o' + oa.id; seen.add(key);
     let m = objs.get(key);
@@ -299,7 +332,7 @@ let follow = true;
 const focus = new THREE.Vector3(0, 1, 0); let focusInit = false;
 function followCamera(dt) {
   const d = drone.position, p = personFigure.position;
-  const sx = (d.x + p.x) / 2, sy = (d.y + p.y) / 2, sz = (d.z + 0.9) / 2;                   // midpoint in sim coords
+  const sx = (d.x + p.x) / 2, sy = (d.y + p.y) / 2, sz = (d.z + p.z) / 2 + 0.3;                   // midpoint in sim coords
   const tgt = new THREE.Vector3(sx, sz, -sy);                                               // -> three.js (x, z, -y)
   if (!focusInit) { focus.copy(tgt); focusInit = true; controls.target.copy(tgt); camera.position.copy(tgt).add(new THREE.Vector3(3.6, 2.6, 3.6)); }
   const delta = tgt.clone().sub(focus).multiplyScalar(Math.min(1, dt * 3.2)); focus.add(delta);
@@ -309,13 +342,16 @@ function followCamera(dt) {
 
 /* ---------- UI ---------- */
 const COL = {'FOLLOW TARGET': ['var(--ok)', '#38c17233'], AVOIDING: ['var(--warn)', '#ff9f1a33'], COLLISION: ['var(--bad)', '#ef444433']};
-let lastStatus = '';
+let lastStatus = '', windAngle = 0;
 function setHud(s) {
   if (s.status !== lastStatus) {
     lastStatus = s.status; const [c, halo] = COL[s.status] || ['var(--mut)', '#fff2'];
     $('dot').style.background = c; $('dot').style.boxShadow = `0 0 0 4px ${halo}`; $('label').textContent = s.status;
     $('flash').style.opacity = s.status === 'COLLISION' ? .55 : 0;
   }
+  const w = s.wind || [0, 0, 0], ws = Math.hypot(w[0], w[1]);
+  $('wtxt').textContent = ws < .3 ? 'calm' : ws.toFixed(1) + ' m/s';
+  windAngle = Math.atan2(w[0], w[1]); $('wind').style.opacity = ws < .3 ? .55 : 1;
   $('meta').textContent = `${s.policy} policy · level ${s.difficulty} · ${s.episodes} episodes · ${s.collisions} collisions`;
   document.querySelectorAll('#pol button').forEach(b => b.classList.toggle('on', b.dataset.pol === s.policy));
   if (document.activeElement !== $('diff')) $('diff').value = s.difficulty;
@@ -336,7 +372,7 @@ function connect() {
   const es = new EventSource('/events');
   es.onmessage = ev => {
     const s = JSON.parse(ev.data); s.rt = performance.now();
-    if (s.ep !== episode) { episode = s.ep; clearDynamic(); buf.length = 0; }
+    if (s.ep !== episode) { episode = s.ep; clearDynamic(); buf.length = 0; loadWorld(); }
     buf.push(s); while (buf.length > 12) buf.shift(); setHud(s);
   };
   es.onerror = () => { $('label').textContent = 'RECONNECTING'; es.close(); setTimeout(connect, 1500); };
@@ -352,6 +388,8 @@ function frame(now) {
   const dt = Math.min((now - lastFrameT) / 1000, .1); lastFrameT = now;
   const pk = pick(now);
   if (pk) { applyState(pk.a, pk.b, pk.k, dt); followCamera(dt); }
+  const az = Math.atan2(camera.position.x - controls.target.x, camera.position.z - controls.target.z);   // camera heading
+  $('warrow').style.transform = `rotate(${((windAngle + az) * 180 / Math.PI).toFixed(0)}deg)`;
   controls.update(); renderer.render(scene, camera); requestAnimationFrame(frame);
 }
 requestAnimationFrame(frame);

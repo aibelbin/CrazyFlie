@@ -19,6 +19,8 @@ import os
 import queue
 import threading
 import time
+
+import numpy as np
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from drone_follow import config as C
@@ -116,6 +118,17 @@ def _r(v, n=3):
     return [round(float(x), n) for x in v]
 
 
+def world_snapshot(sc, episode_id: int) -> bytes:
+    """Static scenery for the viewer (fetched once per episode): terrain heights, trees and rocks."""
+    terrain = None
+    if sc.terrain is not None:
+        from drone_follow.world import GRID, HALF
+        terrain = {"half": HALF, "n": GRID, "z": [round(float(v), 2) for v in sc.terrain.grid().flatten()]}
+    statics = [{"k": str(k), "p": _r(pp, 2), "r": round(float(r), 2), "g": int(g)}
+               for pp, r, k, g in zip(sc.static_pos, sc.static_r, sc.static_kind, sc.static_group)]
+    return json.dumps({"ep": episode_id, "terrain": terrain, "statics": statics}, separators=(",", ":")).encode()
+
+
 class Sim:
     """Owns the /play simulation. Only its own thread touches PyBullet; handlers send commands.
     Each control step it publishes a JSON snapshot of every pose for the browser to draw."""
@@ -129,6 +142,7 @@ class Sim:
         self.last_seen = 0.0                      # starts idle until someone opens /play
         self.status, self.episodes, self.collisions = "STARTING", 0, 0
         self.episode_id = 0
+        self.world_json = b"{}"
 
     def touch(self):
         self.last_seen = time.time()
@@ -137,8 +151,11 @@ class Sim:
         sc = sim.scenario
         obs = [{"id": i, "k": o.kind, "p": _r(o.pos), "v": _r(o.vel), "r": round(float(o.radius), 3),
                 "a": int(o.active), "g": o.group} for i, o in enumerate(sc.obstacles)]
-        msg = {"ep": self.episode_id, "drone": {"p": _r(sim.pos[0]), "q": _r(sim.quat[0], 4), "v": _r(sim.vel[0])},
-               "person": {"p": _r(sc.person), "v": _r(sc.person_vel)}, "obs": obs,
+        wind = sim._wind.mean + sim._wind.dev if sim._wind is not None else np.zeros(3)
+        msg = {"ep": self.episode_id, "drone": {"p": _r(sim.pos[0]), "q": _r(sim.quat[0], 4), "v": _r(sim.vel[0]),
+                                                  "gz": round(sc.ground(sim.pos[0][:2]), 3)},
+               "person": {"p": _r(sc.person), "v": _r(sc.person_vel), "gz": round(sc.ground(sc.person), 3)},
+               "wind": _r(wind, 2), "obs": obs,
                "status": self.status, "policy": self.current, "difficulty": self.difficulty,
                "episodes": self.episodes, "collisions": self.collisions}
         with self.cond:
@@ -154,6 +171,7 @@ class Sim:
             self.episode_id += 1
             obs, _ = env.reset()
             self.status = "FOLLOW TARGET"
+            self.world_json = world_snapshot(sim.scenario, self.episode_id)
             return obs
 
         obs = new_episode()
@@ -275,6 +293,8 @@ def make_handler(sim: Sim, runs_dir: str, runs: list):
                 self._send(200, json.dumps({
                     "status": sim.status, "policy": sim.current, "episodes": sim.episodes,
                     "collisions": sim.collisions}).encode())
+            elif path == "/api/world":
+                self._send(200, sim.world_json)
             elif path == "/events":                       # server-sent events: one pose snapshot per step
                 self.send_response(200)
                 self.send_header("Content-Type", "text/event-stream")
@@ -335,7 +355,7 @@ def make_handler(sim: Sim, runs_dir: str, runs: list):
             if path.startswith("/api/"):
                 cmd = path[len("/api/"):]
                 if cmd.startswith("difficulty/"):
-                    sim.difficulty = min(max(int(cmd.split("/")[1] or 2), 0), 3)
+                    sim.difficulty = min(max(int(cmd.split("/")[1] or 2), 0), 5)
                     cmd = f"difficulty/{sim.difficulty}"
                 sim.cmds.put(cmd)
             self._send(200, b"{}")

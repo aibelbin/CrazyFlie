@@ -49,6 +49,7 @@ class FollowAvoidAviary(F450Mixin, BaseRLAviary):
         self._crashed = False
         self._first_obs = True
         self._tilt = 0.0
+        self._agl = C.FOLLOW_ALT
         super().__init__(
             drone_model=F450 if C.F450 else DroneModel.CF2X, num_drones=1,
             initial_xyzs=self._scenario.drone_start[None, :].copy(),
@@ -56,7 +57,7 @@ class FollowAvoidAviary(F450Mixin, BaseRLAviary):
             gui=gui, record=False, obs=ObservationType.KIN, act=ActionType.VEL)
         self.SPEED_LIMIT = C.SPEED_LIMIT     # the library default (0.25 m/s) is far too slow
         if C.F450:
-            self._f450_setup(WindField(self._rng, C.WIND_MEAN, C.WIND_GUST) if (C.WIND_MEAN or C.WIND_GUST) else None)
+            self._f450_setup(None)
 
     # ----------------------------------------------------------------- spaces
     def _actionSpace(self):
@@ -93,7 +94,19 @@ class FollowAvoidAviary(F450Mixin, BaseRLAviary):
         self._crashed = False
         self._first_obs = True
         self._f450_reset()
+        if C.F450:
+            self._f450_set_wind(self._wind_for_level())
         return super().reset(seed=seed, options=options)
+
+    def _wind_for_level(self):
+        """Levels 4-5 are windy (F450 only): 4 = breeze with light gusts, 5 = strong wind with gusts.
+        Lower levels use the DF_WIND / DF_GUST settings (calm by default)."""
+        lvl, rng = self.difficulty, self._rng
+        if lvl == 4:
+            return WindField(rng, rng.uniform(0.0, 3.0), 1.0)
+        if lvl >= 5:
+            return WindField(rng, rng.uniform(2.0, 6.0), 2.5)
+        return WindField(rng, C.WIND_MEAN, C.WIND_GUST) if (C.WIND_MEAN or C.WIND_GUST) else None
 
     def _addObstacles(self):               # called from _housekeeping() after every reset
         self._scenario.attach(self.CLIENT)
@@ -110,7 +123,7 @@ class FollowAvoidAviary(F450Mixin, BaseRLAviary):
         if C.ACTION_RATE_LIMIT > 0:          # smooth by construction: bound how fast the command may change
             lim = C.ACTION_RATE_LIMIT
             a = self._prev_action + np.clip(a - self._prev_action, -lim, lim)
-        self._scenario.advance(self.CTRL_TIMESTEP, self.pos[0])
+        self._scenario.advance(self.CTRL_TIMESTEP, self.pos[0], self.vel[0])
         self._action = a
         out = super().step(a)
         self._prev_action = a
@@ -129,7 +142,9 @@ class FollowAvoidAviary(F450Mixin, BaseRLAviary):
         self._first_obs = False
         self._clearance = self._scenario.clearance(pos)
         self._tilt = float(max(abs(rpy[0]), abs(rpy[1])))
-        self._crashed = (self._clearance < 0.0 or pos[2] < C.GROUND_Z
+        agl = pos[2] - self._scenario.ground(pos[:2])                    # height above the terrain
+        self._agl = float(agl)
+        self._crashed = (self._clearance < 0.0 or agl < C.GROUND_Z
                          or abs(rpy[0]) > C.MAX_TILT or abs(rpy[1]) > C.MAX_TILT)
 
         rel = self._scenario.target_point - pos
@@ -138,7 +153,7 @@ class FollowAvoidAviary(F450Mixin, BaseRLAviary):
         obs = np.concatenate([
             rel / (dist + 1e-9), [dist / 8.0],
             self._scenario.person_vel, [0.0], vel / C.SPEED_LIMIT,
-            rpy[:2], [pos[2] / 3.0], self._prev_action,
+            rpy[:2], [agl / 3.0], self._prev_action,
             self._ranges / C.MAX_RANGE, rate,
         ]).astype(np.float32)
         self._follow_dist = dist
@@ -151,7 +166,7 @@ class FollowAvoidAviary(F450Mixin, BaseRLAviary):
         Used only to shape the training reward; the policy itself sees just the range strip.
         """
         pos, vel = self.pos[0], self.vel[0]
-        urgency, min_gap = 0.0, np.inf
+        urgency, min_gap = self._scenario.static_hazard(pos, vel)
         for o in self._scenario.live_obstacles():
             rel = o.pos - pos
             dist = float(np.linalg.norm(rel)) + 1e-9
@@ -185,7 +200,8 @@ class FollowAvoidAviary(F450Mixin, BaseRLAviary):
 
     def _computeTruncated(self):
         pos = self._getDroneStateVector(0)[0:3]
-        out = np.abs(pos[:2]).max() > C.ARENA_BOUND or pos[2] > C.Z_MAX
+        out = (np.abs(pos[:2]).max() > self._scenario.bound
+               or pos[2] - self._scenario.ground(pos[:2]) > self._scenario.z_cap)
         timeout = self.step_counter / self.PYB_FREQ > self.episode_sec
         return bool(out or timeout)
 
@@ -196,9 +212,13 @@ class FollowAvoidAviary(F450Mixin, BaseRLAviary):
         pos = self.pos[0]
         if self._clearance < 0.0:
             live = self._scenario.live_obstacles()
-            gaps = [float(np.linalg.norm(pos - o.pos)) - o.radius for o in live]
-            return live[int(np.argmin(gaps))].kind
-        return "ground" if pos[2] < C.GROUND_Z else "flip"
+            best_gap, best_kind = self._scenario.nearest_static_kind(pos)[::-1]
+            for o in live:
+                gap = float(np.linalg.norm(pos - o.pos)) - o.radius
+                if gap < best_gap:
+                    best_gap, best_kind = gap, o.kind
+            return best_kind
+        return "ground" if self._agl < C.GROUND_Z else "flip"
 
     def _computeInfo(self):
         return {"collision": bool(self._crashed), "collision_kind": self._collision_kind(),

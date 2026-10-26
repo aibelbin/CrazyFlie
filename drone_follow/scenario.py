@@ -12,6 +12,7 @@ import pybullet as p
 
 from drone_follow import config as C
 from drone_follow.walker import Walker, build_scenery
+from drone_follow.world import Terrain, forest
 
 DEBRIS_RGBA = (0.55, 0.5, 0.45, 1.0)
 RIVAL_RGBA = (0.9, 0.1, 0.1, 1.0)
@@ -32,6 +33,8 @@ class Obstacle:
     active: bool = True
     body: int = -1
     group: int = -1                # pedestrians: the three spheres of one person share a group
+    z_off: float = 0.0             # pedestrians: sphere height above the ground
+    fall: bool = False             # falling debris: accelerates downward until it lands
 
 
 class Scenario:
@@ -44,6 +47,14 @@ class Scenario:
         Levels >= 2 (when `pedestrians` is on) also add people walking across the arena."""
         self.rng = rng
         self.difficulty = difficulty
+        # levels 4-5 add hills, a forest and (on the F450) wind: 4 = level-2 content, 5 = level-3 content + falling debris
+        self.terrain = Terrain(rng) if difficulty >= 4 else None
+        eff = {4: 2, 5: 3}.get(difficulty, difficulty)
+        self.half = 16.0 if self.terrain else 5.0                 # half-width of the area obstacles are placed in
+        self.person_range = C.WORLD_PERSON if self.terrain else C.ARENA_PERSON
+        self.bound = C.WORLD_BOUND if self.terrain else C.ARENA_BOUND
+        self.z_cap = C.WORLD_Z_MAX if self.terrain else C.Z_MAX
+        self._eff = eff
         self.humanoid = humanoid            # draw walking figures + scenery (visual only)
         self._walkers: dict = {}
         self._next_group = 0
@@ -52,7 +63,7 @@ class Scenario:
         self.person_body = -1
         self.obstacles: list[Obstacle] = []
 
-        self.person = rng.uniform(-C.ARENA_PERSON, C.ARENA_PERSON, 2)
+        self.person = rng.uniform(-self.person_range, self.person_range, 2)
         self.person_vel = np.zeros(2)
         self._speed = rng.uniform(0.3, 0.7)
         self._waypoint = self._new_waypoint()
@@ -62,20 +73,30 @@ class Scenario:
 
         ang = rng.uniform(0, 2 * np.pi)
         start_xy = self.person + 2.5 * np.array([np.cos(ang), np.sin(ang)])
-        self.drone_start = np.array([start_xy[0], start_xy[1], C.FOLLOW_ALT])
+        self.drone_start = np.array([start_xy[0], start_xy[1], C.FOLLOW_ALT + self.ground(start_xy)])
 
+        self.static_pos, self.static_r = np.zeros((0, 3)), np.zeros(0)
+        self.static_kind, self.static_group = np.array([], dtype=object), np.zeros(0, dtype=int)
+        if self.terrain:
+            keep = [(self.person, 2.5), (start_xy, 2.5)]
+            self.static_pos, self.static_r, self.static_kind, self.static_group = forest(rng, self.terrain, keep)
         if difficulty >= 1:
             self._place_debris()
         if pedestrians and difficulty >= 2:
-            for _ in range(3 if difficulty >= 3 else rng.integers(1, 3)):
+            for _ in range(3 if eff >= 3 else rng.integers(1, 3)):
                 self.add_pedestrian()
-        n_rivals = 0 if difficulty < 2 else (2 if difficulty >= 3 else int(rng.random() < 0.8))
+        n_rivals = 0 if difficulty < 2 else (2 if eff >= 3 else int(rng.random() < 0.8))
         self._rival_times = sorted(rng.uniform(1.0, 7.0) for _ in range(n_rivals))
+        self._fall_times = sorted(rng.uniform(2.0, 16.0) for _ in range(int(rng.integers(2, 5)))) if difficulty >= 5 else []
 
     # ------------------------------------------------------------------ queries
+    def ground(self, xy) -> float:
+        """Terrain height under (x, y); 0 on the flat levels."""
+        return 0.0 if self.terrain is None else float(self.terrain.height(xy[0], xy[1]))
+
     @property
     def target_point(self) -> np.ndarray:
-        return np.array([self.person[0], self.person[1], C.FOLLOW_ALT])
+        return np.array([self.person[0], self.person[1], C.FOLLOW_ALT + self.ground(self.person)])
 
     def live_obstacles(self):
         return [o for o in self.obstacles if o.active]
@@ -85,11 +106,35 @@ class Scenario:
         best = np.inf
         for o in self.live_obstacles():
             best = min(best, np.linalg.norm(pos - o.pos) - o.radius - C.DRONE_RADIUS)
+        if len(self.static_r):
+            best = min(best, float((np.linalg.norm(self.static_pos - pos, axis=1) - self.static_r).min() - C.DRONE_RADIUS))
         return float(best)
+
+    def static_hazard(self, pos: np.ndarray, vel: np.ndarray):
+        """(urgency, min gap) over the static trees and rocks, vectorised (they do not move)."""
+        if not len(self.static_r):
+            return 0.0, np.inf
+        rel = self.static_pos - pos
+        dist = np.linalg.norm(rel, axis=1) + 1e-9
+        gap = dist - self.static_r - C.DRONE_RADIUS
+        closing = (rel / dist[:, None]) @ vel                       # > 0 when flying toward it
+        ok = closing > 0.05
+        urgency = 0.0
+        if ok.any():
+            ttc = np.maximum(gap[ok], 0.0) / closing[ok]
+            urgency = float((np.clip((C.TTC_START - ttc) / C.TTC_START, 0.0, 1.0) ** 2).max())
+        return urgency, float(gap.min())
+
+    def nearest_static_kind(self, pos: np.ndarray):
+        if not len(self.static_r):
+            return None, np.inf
+        gaps = np.linalg.norm(self.static_pos - pos, axis=1) - self.static_r
+        i = int(np.argmin(gaps))
+        return str(self.static_kind[i]), float(gaps[i])
 
     # ----------------------------------------------------------------- spawning
     def _new_waypoint(self) -> np.ndarray:
-        return self.rng.uniform(-C.ARENA_PERSON, C.ARENA_PERSON, 2)
+        return self.rng.uniform(-self.person_range, self.person_range, 2)
 
     def _place_debris(self):
         rng = self.rng
@@ -104,16 +149,17 @@ class Scenario:
             self.obstacles.append(
                 Obstacle(pos, np.zeros(3), rng.uniform(0.3, 0.5), "debris")
             )
-        n_scatter = rng.integers(3, 6) if self.difficulty >= 3 else rng.integers(1, 4)
+        n_scatter = rng.integers(3, 6) if self._eff >= 3 else rng.integers(1, 4)
         for _ in range(n_scatter):                          # scattered around
             for _try in range(20):
-                pos = np.array([*rng.uniform(-5, 5, 2), rng.uniform(0.5, 2.2)])
+                xy = rng.uniform(-self.half, self.half, 2)
+                pos = np.array([xy[0], xy[1], rng.uniform(0.5, 2.2) + self.ground(xy)])
                 r = rng.uniform(0.25, 0.5)
                 if (np.linalg.norm(pos - start) > 1.2 + r
                         and np.linalg.norm(pos[:2] - self.person) > 1.5 + r):
                     break
             vel = np.zeros(3)
-            if self.difficulty >= 2 and rng.random() < 0.6:
+            if self._eff >= 2 and rng.random() < 0.6:
                 a = rng.uniform(0, 2 * np.pi)
                 vel = rng.uniform(0.2, 0.6) * np.array([np.cos(a), np.sin(a), rng.uniform(-0.1, 0.1)])
             self.obstacles.append(Obstacle(pos, vel, r, "debris"))
@@ -123,7 +169,7 @@ class Scenario:
         rng = self.rng
         if xy is None:
             for _try in range(20):
-                xy = rng.uniform(-5, 5, 2)
+                xy = rng.uniform(-self.half, self.half, 2)
                 if np.linalg.norm(xy - self.drone_start[:2]) > 1.8:
                     break
         xy = np.asarray(xy, float)
@@ -133,8 +179,8 @@ class Scenario:
         added = []
         group, self._next_group = self._next_group, self._next_group + 1
         for z in PEDESTRIAN_SPHERE_Z:
-            ob = Obstacle(np.array([xy[0], xy[1], z]), np.array([vel_xy[0], vel_xy[1], 0.0]),
-                          PEDESTRIAN_RADIUS, "pedestrian", group=group)
+            ob = Obstacle(np.array([xy[0], xy[1], z + self.ground(xy)]), np.array([vel_xy[0], vel_xy[1], 0.0]),
+                          PEDESTRIAN_RADIUS, "pedestrian", group=group, z_off=z)
             self.obstacles.append(ob)
             if self.client is not None:
                 self._make_body(ob)
@@ -147,10 +193,11 @@ class Scenario:
         az, el = rng.uniform(0, 2 * np.pi), rng.uniform(-0.25, 0.25)
         direction = np.array([np.cos(el) * np.cos(az), np.cos(el) * np.sin(az), np.sin(el)])
         pos = drone_pos + 6.0 * direction
-        pos[2] = np.clip(pos[2], 0.5, 2.8)
+        g = self.ground(pos[:2])
+        pos[2] = np.clip(pos[2], g + 0.5, g + 2.8)
         aim = drone_pos + rng.uniform(-0.4, 0.4, 3)
         v = (aim - pos)
-        lo, hi = (1.4, 2.4) if self.difficulty >= 3 else (0.8, 1.3)
+        lo, hi = (1.4, 2.4) if self._eff >= 3 else (0.8, 1.3)
         v = v / np.linalg.norm(v) * (speed if speed else rng.uniform(lo, hi))
         ob = Obstacle(pos, v, 0.2, "rival")
         self.obstacles.append(ob)
@@ -168,6 +215,20 @@ class Scenario:
             self._make_body(ob)
         return ob
 
+    def spawn_falling(self, drone_pos: np.ndarray, drone_vel: np.ndarray | None = None):
+        """A branch or rock that drops out of the canopy ahead of the drone (sudden hazard)."""
+        rng = self.rng
+        d = np.zeros(2) if drone_vel is None else np.asarray(drone_vel, float)[:2]
+        n = float(np.linalg.norm(d))
+        d = d / n if n > 0.2 else (self.person - drone_pos[:2]) / (np.linalg.norm(self.person - drone_pos[:2]) + 1e-9)
+        xy = drone_pos[:2] + 3.5 * d + rng.uniform(-0.4, 0.4, 2)
+        ob = Obstacle(np.array([xy[0], xy[1], self.ground(xy) + 3.6]), np.zeros(3), rng.uniform(0.25, 0.4),
+                      "debris", fall=True)
+        self.obstacles.append(ob)
+        if self.client is not None:
+            self._make_body(ob)
+        return ob
+
     # --------------------------------------------------------------- simulation
     def set_person(self, xy: np.ndarray, dt: float):
         """Drive the person externally (webcam). Velocity is finite-differenced."""
@@ -176,7 +237,7 @@ class Scenario:
         self.person = xy
         self.external_person = True
 
-    def advance(self, dt: float, drone_pos: np.ndarray):
+    def advance(self, dt: float, drone_pos: np.ndarray, drone_vel: np.ndarray | None = None):
         self.t += dt
         self._prev_person = self.person.copy()
         self._prev_pos = {id(o): o.pos.copy() for o in self.obstacles}
@@ -192,16 +253,28 @@ class Scenario:
         while self._rival_times and self.t >= self._rival_times[0]:
             self._rival_times.pop(0)
             self.spawn_rival(drone_pos)
+        while self._fall_times and self.t >= self._fall_times[0]:
+            self._fall_times.pop(0)
+            self.spawn_falling(drone_pos, drone_vel)
+        edge = self.half + 1.0                                  # = ARENA on the flat levels
         for o in self.live_obstacles():
+            if o.fall:
+                o.vel[2] -= 9.8 * dt
             o.pos = o.pos + o.vel * dt
+            g = self.ground(o.pos[:2])
+            if o.fall and o.pos[2] - g < o.radius:               # landed: stays where it fell
+                o.pos[2], o.vel, o.fall = g + o.radius, np.zeros(3), False
+                continue
             if o.kind == "rival":
-                if np.abs(o.pos[:2]).max() > 9.0 or o.pos[2] < 0.1:
+                if np.abs(o.pos[:2]).max() > self.bound + 1.0 or o.pos[2] - g < 0.1:
                     o.active = False
                 continue
             for ax in (0, 1):
-                if abs(o.pos[ax]) > ARENA:
+                if abs(o.pos[ax]) > edge:
                     o.vel[ax] *= -1
-            if o.kind == "debris" and not 0.4 < o.pos[2] < 2.6:
+            if o.kind == "pedestrian":
+                o.pos[2] = g + o.z_off
+            elif o.kind == "debris" and not o.fall and np.any(o.vel) and not 0.4 < o.pos[2] - g < 2.6:
                 o.vel[2] *= -1
         if not Scenario.DEFER_SYNC:
             self._sync()
@@ -221,6 +294,11 @@ class Scenario:
                 basePosition=[*self.person, 0.82], physicsClientId=client)
         for o in self.obstacles:
             self._make_body(o)
+        if self.terrain:
+            self.terrain.attach(client)
+            for pos, r in zip(self.static_pos, self.static_r):
+                col = p.createCollisionShape(p.GEOM_SPHERE, radius=float(r), physicsClientId=client)
+                p.createMultiBody(0, col, -1, basePosition=pos.tolist(), physicsClientId=client)
 
     def _make_body(self, o: Obstacle):
         c = self.client

@@ -9,6 +9,25 @@ person is found with a **pretrained YOLO** model. Physics come from
 > MacBook Air). Training is done on a remote machine and only the results come back.
 > Running, evaluating a few episodes and the 3D viewer are light and fine locally.
 
+## The F450 drone and the outdoor world (levels 4-5)
+
+The target hardware is a DIY F450 flown by ArduPilot, so the simulation can model it:
+
+```
+DF_DRONE=f450 python -m drone_follow.web --model <policy.zip> --difficulty 5
+```
+
+- `DF_DRONE=f450` swaps the Crazyflie for a 1.5 kg F450 (`drone_follow/f450.py`): realistic inertia and motor
+  lag, and an ArduPilot-style velocity controller (accel-limited setpoints, velocity PI, tilt limit, attitude
+  and rate loops, motor mixer) running at 240 Hz. The policy still outputs a velocity command, exactly what
+  ArduPilot's GUIDED mode accepts. The speed limit is 2.5 m/s and the collision radius 0.32 m.
+- Levels 0-3 are unchanged. **Level 4**: hills with mountains at the edge, a forest and rocks (trees are
+  stacks of spheres, so rays and collisions treat them like any obstacle), pedestrians, a rival drone, a
+  breeze with gusts. **Level 5**: the level-3 crowd plus stronger wind, and branches that drop out of the
+  canopy ahead of the drone. The policy sees height above the ground, not absolute altitude.
+- `DF_WIND` / `DF_GUST` set a steady wind and gusts (m/s) on the lower levels (F450 only).
+- The viewer draws the terrain, trees, rocks, a wind readout and arrow.
+
 ## 3D viewer and training dashboard (in the browser)
 
 ```
@@ -80,6 +99,8 @@ clearly worse, so `ppo_ft` is the model to use; the cause was not investigated.
 | `drone_follow/policies.py` | naive and reactive baselines |
 | `drone_follow/train.py` | PPO training (curriculum, `--resume`, `--mix`) |
 | `drone_follow/train_long.py` | long run: shaped reward, mixed levels, best-checkpoint selection, time budget (remote machine only) |
+| `drone_follow/f450.py` | F450 model, ArduPilot-style velocity controller, motor lag, wind |
+| `drone_follow/world.py` | terrain, forest and rocks for levels 4-5 |
 | `drone_follow/web.py` | web server: training dashboard and the 3D viewer's pose stream |
 | `drone_follow/static/` | the three.js viewer (`viewer.html`, `viewer.js`) and its vendored libraries |
 | `drone_follow/evaluate.py` | collision rate / follow error on fixed seeds |

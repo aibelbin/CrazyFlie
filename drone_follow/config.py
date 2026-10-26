@@ -21,6 +21,9 @@ MAX_TILT = 1.2             # rad, beyond this the drone counts as flipped
 ARENA_PERSON = 3.5         # m, person walks inside +-this square
 ARENA_BOUND = 8.0          # m, drone leaving +-this square truncates the episode
 Z_MAX = 3.5
+WORLD_PERSON = 12.0        # levels >= 4 (hills, forest): the person walks inside +-this square
+WORLD_BOUND = 22.0         # ... and the drone leaving +-this square truncates the episode
+WORLD_Z_MAX = 7.0          # ... height above the ground that truncates the episode
 
 # Range sensing (a simple depth/lidar-style strip around the drone)
 N_AZ = 8
