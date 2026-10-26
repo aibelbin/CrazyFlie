@@ -1,0 +1,4 @@
+vendor/gym-pybullet-drones is an unmodified copy of
+https://github.com/utiasDSL/gym-pybullet-drones (MIT licence)
+at commit f83fbdd4ee1c07e1afa52694963f3a9a889a0f56 (shallow clone; its own .git removed).
+To restore the clone:  git clone https://github.com/utiasDSL/gym-pybullet-drones vendor/gym-pybullet-drones

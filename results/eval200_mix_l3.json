@@ -1,0 +1,9 @@
+{
+  "ppo/level3": {
+    "difficulty": 3,
+    "episodes": 200,
+    "collision_rate": 0.435,
+    "mean_follow_error_m": 0.3639206102076184,
+    "mean_survival_s": 15.404166666666665
+  }
+}

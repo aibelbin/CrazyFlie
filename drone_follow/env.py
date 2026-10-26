@@ -1,0 +1,186 @@
+"""Gymnasium environment: follow a walking person while avoiding debris and rival drones.
+
+Built on gym-pybullet-drones (Crazyflie quadrotor physics + its PID flight controller).
+The policy outputs a 3D velocity command; the library's controller turns it into
+motor RPMs.
+
+Observation (OBS_DIM floats, all roughly in [-1, 1]):
+    0:3    unit vector drone -> follow point (world frame)
+    3      distance to follow point / 8
+    4:7    person velocity (m/s)
+    7:10   drone velocity / SPEED_LIMIT
+    10:12  roll, pitch
+    12     drone altitude / 3
+    13:16  previous action
+    16:40  range strip (N_RAYS), metres / MAX_RANGE
+    40:64  range strip rate of change (closing speed / 2 m/s), clipped
+"""
+import gymnasium as gym
+import numpy as np
+import pybullet as p
+from gymnasium import spaces
+
+from gym_pybullet_drones.envs.BaseRLAviary import BaseRLAviary
+from gym_pybullet_drones.utils.enums import ActionType, DroneModel, ObservationType, Physics
+
+from drone_follow import config as C
+from drone_follow.scenario import Scenario
+from drone_follow.sensing import N_RAYS, range_scan
+
+OBS_DIM = 16 + 2 * N_RAYS
+RANGE_SLICE = slice(16, 16 + N_RAYS)
+
+
+class FollowAvoidAviary(BaseRLAviary):
+    def __init__(self, gui: bool = False, difficulty: int = 2,
+                 episode_sec: float = C.EPISODE_SEC, seed: int | None = None,
+                 pedestrians: bool = True, realistic: bool = False):
+        self.difficulty = difficulty
+        self.pedestrians = pedestrians
+        self.realistic = realistic          # walking figures + scenery (visual only)
+        self.episode_sec = episode_sec
+        self._rng = np.random.default_rng(seed)
+        self._scenario = Scenario(self._rng, difficulty, pedestrians, realistic)
+        self._prev_action = np.zeros(3)
+        self._ranges = np.full(N_RAYS, C.MAX_RANGE)
+        self._prev_ranges = self._ranges.copy()
+        self._clearance = np.inf
+        self._crashed = False
+        self._first_obs = True
+        super().__init__(
+            drone_model=DroneModel.CF2X, num_drones=1,
+            initial_xyzs=self._scenario.drone_start[None, :].copy(),
+            physics=Physics.PYB, pyb_freq=C.PYB_FREQ, ctrl_freq=C.CTRL_FREQ,
+            gui=gui, record=False, obs=ObservationType.KIN, act=ActionType.VEL)
+        self.SPEED_LIMIT = C.SPEED_LIMIT     # the library default (0.25 m/s) is far too slow
+
+    # ----------------------------------------------------------------- spaces
+    def _actionSpace(self):
+        return spaces.Box(-1.0, 1.0, shape=(1, 3), dtype=np.float32)
+
+    def _observationSpace(self):
+        return spaces.Box(-10.0, 10.0, shape=(1, OBS_DIM), dtype=np.float32)
+
+    def _preprocessAction(self, action):
+        a = np.clip(np.asarray(action, float).reshape(3), -1.0, 1.0)
+        mag = min(float(np.linalg.norm(a)), 1.0)
+        return super()._preprocessAction(np.array([[*a, mag]]))   # (direction, speed)
+
+    # ------------------------------------------------------------- lifecycle
+    def set_difficulty(self, difficulty: int):
+        self.difficulty = difficulty          # applies from the next reset
+
+    @property
+    def scenario(self) -> Scenario:
+        return self._scenario
+
+    def reset(self, seed=None, options=None):
+        if seed is not None:
+            self._rng = np.random.default_rng(seed)
+        self._scenario = Scenario(self._rng, self.difficulty, self.pedestrians, self.realistic)
+        self.INIT_XYZS = self._scenario.drone_start[None, :].copy()
+        self._prev_action = np.zeros(3)
+        self._ranges = np.full(N_RAYS, C.MAX_RANGE)
+        self._prev_ranges = self._ranges.copy()
+        self._crashed = False
+        self._first_obs = True
+        return super().reset(seed=seed, options=options)
+
+    def _addObstacles(self):               # called from _housekeeping() after every reset
+        self._scenario.attach(self.CLIENT)
+        self._halo = None
+        if not self.realistic:                # the live demo draws a real quadcopter model instead
+            # Visual-only halo so the 9 cm quadrotor is easy to spot in rendered clips.
+            vis = p.createVisualShape(p.GEOM_SPHERE, radius=0.14, rgbaColor=(0.1, 0.4, 1.0, 0.8),
+                                      physicsClientId=self.CLIENT)
+            self._halo = p.createMultiBody(0, -1, vis, basePosition=self.INIT_XYZS[0].tolist(),
+                                           physicsClientId=self.CLIENT)
+
+    def step(self, action):
+        a = np.clip(np.asarray(action, float).reshape(3), -1.0, 1.0)
+        self._scenario.advance(self.CTRL_TIMESTEP, self.pos[0])
+        self._action = a
+        out = super().step(a)
+        self._prev_action = a
+        if self._halo is not None:
+            p.resetBasePositionAndOrientation(self._halo, self.pos[0].tolist(), [0, 0, 0, 1],
+                                              physicsClientId=self.CLIENT)
+        return out
+
+    # ----------------------------------------------------------- observation
+    def _computeObs(self):
+        s = self._getDroneStateVector(0)
+        pos, rpy, vel = s[0:3], s[7:10], s[10:13]
+        new_ranges = range_scan(self.CLIENT, pos)
+        self._prev_ranges = new_ranges if self._first_obs else self._ranges
+        self._ranges = new_ranges
+        self._first_obs = False
+        self._clearance = self._scenario.clearance(pos)
+        self._crashed = (self._clearance < 0.0 or pos[2] < C.GROUND_Z
+                         or abs(rpy[0]) > C.MAX_TILT or abs(rpy[1]) > C.MAX_TILT)
+
+        rel = self._scenario.target_point - pos
+        dist = float(np.linalg.norm(rel))
+        rate = np.clip((self._ranges - self._prev_ranges) / self.CTRL_TIMESTEP / 2.0, -1.5, 1.5)
+        obs = np.concatenate([
+            rel / (dist + 1e-9), [dist / 8.0],
+            self._scenario.person_vel, [0.0], vel / C.SPEED_LIMIT,
+            rpy[:2], [pos[2] / 3.0], self._prev_action,
+            self._ranges / C.MAX_RANGE, rate,
+        ]).astype(np.float32)
+        self._follow_dist = dist
+        return obs[None, :]
+
+    # ---------------------------------------------------------------- reward
+    def _computeReward(self):
+        if self._crashed:
+            return C.R_COLLISION
+        follow = C.R_FOLLOW * (1.0 - min(abs(self._follow_dist - C.FOLLOW_DIST), 4.0) / 4.0)
+        near = float(self._ranges.min())
+        proximity = -C.R_PROXIMITY * np.clip((C.PROXIMITY_START - near) / 0.7, 0.0, 1.0) ** 2
+        smooth = -C.R_SMOOTH * float(np.linalg.norm(self._action - self._prev_action))
+        return follow + proximity + smooth
+
+    def _computeTerminated(self):
+        return bool(self._crashed)
+
+    def _computeTruncated(self):
+        pos = self._getDroneStateVector(0)[0:3]
+        out = np.abs(pos[:2]).max() > C.ARENA_BOUND or pos[2] > C.Z_MAX
+        timeout = self.step_counter / self.PYB_FREQ > self.episode_sec
+        return bool(out or timeout)
+
+    def _computeInfo(self):
+        return {"collision": bool(self._crashed), "follow_dist": self._follow_dist,
+                "min_range": float(self._ranges.min()),
+                "clearance": float(self._clearance)}
+
+
+class SingleDroneWrapper(gym.Wrapper):
+    """Drops the library's leading num_drones axis so SB3 sees flat vectors."""
+
+    def __init__(self, env: FollowAvoidAviary):
+        super().__init__(env)
+        self.observation_space = spaces.Box(-10.0, 10.0, shape=(OBS_DIM,), dtype=np.float32)
+        self.action_space = spaces.Box(-1.0, 1.0, shape=(3,), dtype=np.float32)
+
+    def reset(self, **kw):
+        obs, info = self.env.reset(**kw)
+        return obs[0], info
+
+    def step(self, action):
+        obs, r, term, trunc, info = self.env.step(action)
+        return obs[0], float(r), term, trunc, info
+
+    def set_difficulty(self, difficulty: int):
+        self.env.set_difficulty(difficulty)
+
+
+def make_env(difficulty: int = 2, seed: int | None = None, gui: bool = False,
+             episode_sec: float = C.EPISODE_SEC, pedestrians: bool = True,
+             realistic: bool = False):
+    def _thunk():
+        return SingleDroneWrapper(FollowAvoidAviary(
+            gui=gui, difficulty=difficulty, seed=seed, episode_sec=episode_sec,
+            pedestrians=pedestrians, realistic=realistic))
+    return _thunk

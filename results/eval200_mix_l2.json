@@ -1,0 +1,9 @@
+{
+  "ppo/level2": {
+    "difficulty": 2,
+    "episodes": 200,
+    "collision_rate": 0.345,
+    "mean_follow_error_m": 0.3831929909603625,
+    "mean_survival_s": 16.175666666666665
+  }
+}

@@ -1,0 +1,16 @@
+# Python 3.11. On macOS, `pip install pybullet` fails to compile: see README "Setup".
+pybullet==3.2.7
+gymnasium>=1.4
+stable-baselines3>=2.9
+torch
+ultralytics>=8.4
+opencv-python
+numpy
+scipy
+transforms3d
+control
+pillow
+matplotlib
+tensorboard
+pytest
+# gym-pybullet-drones is vendored in vendor/ and put on the path (see README)

@@ -1,0 +1,44 @@
+{
+  "naive_follow/level2": {
+    "difficulty": 2,
+    "episodes": 200,
+    "collision_rate": 0.695,
+    "mean_follow_error_m": 0.2628673160572865,
+    "mean_survival_s": 8.839
+  },
+  "naive_follow/level3": {
+    "difficulty": 3,
+    "episodes": 200,
+    "collision_rate": 0.775,
+    "mean_follow_error_m": 0.26918405081622265,
+    "mean_survival_s": 7.576333333333333
+  },
+  "reactive_follow/level2": {
+    "difficulty": 2,
+    "episodes": 200,
+    "collision_rate": 0.015,
+    "mean_follow_error_m": 0.33274532038594823,
+    "mean_survival_s": 19.919833333333333
+  },
+  "reactive_follow/level3": {
+    "difficulty": 3,
+    "episodes": 200,
+    "collision_rate": 0.115,
+    "mean_follow_error_m": 0.3436223881053096,
+    "mean_survival_s": 18.523999999999997
+  },
+  "ppo/level2": {
+    "difficulty": 2,
+    "episodes": 200,
+    "collision_rate": 0.125,
+    "mean_follow_error_m": 0.289224433207699,
+    "mean_survival_s": 19.007999999999996
+  },
+  "ppo/level3": {
+    "difficulty": 3,
+    "episodes": 200,
+    "collision_rate": 0.215,
+    "mean_follow_error_m": 0.2925160716498965,
+    "mean_survival_s": 17.816999999999997
+  }
+}

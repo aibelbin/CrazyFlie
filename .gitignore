@@ -1,0 +1,15 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.DS_Store
+
+# generated media
+videos/
+
+# training output: keep only the two trained models listed below
+runs/**
+!runs/
+!runs/ppo_ft/
+!runs/ppo_ft/final.zip
+!runs/ppo_v1.zip
