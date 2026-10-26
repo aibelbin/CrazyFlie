@@ -24,6 +24,7 @@ from gym_pybullet_drones.envs.BaseRLAviary import BaseRLAviary
 from gym_pybullet_drones.utils.enums import ActionType, DroneModel, ObservationType, Physics
 
 from drone_follow import config as C
+from drone_follow.f450 import F450, F450Mixin, WindField
 from drone_follow.scenario import Scenario
 from drone_follow.sensing import N_RAYS, range_scan
 
@@ -31,7 +32,7 @@ OBS_DIM = 16 + 2 * N_RAYS
 RANGE_SLICE = slice(16, 16 + N_RAYS)
 
 
-class FollowAvoidAviary(BaseRLAviary):
+class FollowAvoidAviary(F450Mixin, BaseRLAviary):
     def __init__(self, gui: bool = False, difficulty: int = 2,
                  episode_sec: float = C.EPISODE_SEC, seed: int | None = None,
                  pedestrians: bool = True, realistic: bool = False):
@@ -49,11 +50,13 @@ class FollowAvoidAviary(BaseRLAviary):
         self._first_obs = True
         self._tilt = 0.0
         super().__init__(
-            drone_model=DroneModel.CF2X, num_drones=1,
+            drone_model=F450 if C.F450 else DroneModel.CF2X, num_drones=1,
             initial_xyzs=self._scenario.drone_start[None, :].copy(),
             physics=Physics.PYB, pyb_freq=C.PYB_FREQ, ctrl_freq=C.CTRL_FREQ,
             gui=gui, record=False, obs=ObservationType.KIN, act=ActionType.VEL)
         self.SPEED_LIMIT = C.SPEED_LIMIT     # the library default (0.25 m/s) is far too slow
+        if C.F450:
+            self._f450_setup(WindField(self._rng, C.WIND_MEAN, C.WIND_GUST) if (C.WIND_MEAN or C.WIND_GUST) else None)
 
     # ----------------------------------------------------------------- spaces
     def _actionSpace(self):
@@ -65,6 +68,10 @@ class FollowAvoidAviary(BaseRLAviary):
     def _preprocessAction(self, action):
         a = np.clip(np.asarray(action, float).reshape(3), -1.0, 1.0)
         mag = min(float(np.linalg.norm(a)), 1.0)
+        if C.F450:                                  # the F450 controller runs at the physics rate (see f450.py)
+            n = float(np.linalg.norm(a))
+            self._v_target = self.SPEED_LIMIT * mag * (a / n if n > 0 else a)
+            return np.full((1, 4), self.HOVER_RPM)
         return super()._preprocessAction(np.array([[*a, mag]]))   # (direction, speed)
 
     # ------------------------------------------------------------- lifecycle
@@ -85,6 +92,7 @@ class FollowAvoidAviary(BaseRLAviary):
         self._prev_ranges = self._ranges.copy()
         self._crashed = False
         self._first_obs = True
+        self._f450_reset()
         return super().reset(seed=seed, options=options)
 
     def _addObstacles(self):               # called from _housekeeping() after every reset

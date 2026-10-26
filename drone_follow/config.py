@@ -6,10 +6,14 @@ PYB_FREQ = 240
 CTRL_FREQ = 30
 
 # Flight
-SPEED_LIMIT = 1.5          # m/s, magnitude of the commanded velocity at |action| = 1
+DRONE = os.environ.get("DF_DRONE", "cf2x")     # "cf2x" (Crazyflie, library controller) or "f450" (1.5 kg DIY quad)
+F450 = DRONE == "f450"
+WIND_MEAN = float(os.environ.get("DF_WIND", "0"))          # m/s steady wind (f450 only)
+WIND_GUST = float(os.environ.get("DF_GUST", "0"))          # m/s gust strength (f450 only)
+SPEED_LIMIT = 2.5 if F450 else 1.5    # m/s, magnitude of the commanded velocity at |action| = 1
 FOLLOW_ALT = 1.2           # m, altitude of the point the drone tracks above the person
 FOLLOW_DIST = 2.0          # m, desired 3D distance to the follow point
-DRONE_RADIUS = 0.09        # m, collision radius used for sphere obstacles
+DRONE_RADIUS = 0.32 if F450 else 0.09   # m, collision radius used for sphere obstacles (F450: frame + props)
 GROUND_Z = 0.06            # m, below this the drone counts as crashed
 MAX_TILT = 1.2             # rad, beyond this the drone counts as flipped
 
