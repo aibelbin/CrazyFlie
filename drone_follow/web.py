@@ -34,9 +34,9 @@ RENDER_EVERY = 2                      # render every 2nd 30 Hz control step (15 
 
 STYLE = """
  :root{color-scheme:dark light;--bg:#0f1115;--fg:#e8eaed;--card:#1a1d24;--acc:#4c8dff;--mut:#9aa0a6;
-  --a:#ff7a59;--b:#4cc38a}
+  --a:#ff7a59;--b:#4cc38a;--c:#b58cff}
  @media (prefers-color-scheme:light){:root{--bg:#f4f5f7;--fg:#1c1e22;--card:#fff;--acc:#1a5fe0;--mut:#5f6368;
-  --a:#d4491f;--b:#1a8f5a}}
+  --a:#d4491f;--b:#1a8f5a;--c:#7a4fd0}}
  body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.4 system-ui,sans-serif}
  main{max-width:1100px;margin:0 auto;padding:16px}
  h1{font-size:18px;margin:0 0 4px} h2{font-size:16px;margin:0 0 8px}
@@ -47,7 +47,7 @@ STYLE = """
    padding:9px 12px;font:inherit}
  button:active{background:var(--acc);color:#fff} .on{outline:2px solid var(--acc)}
  label{color:var(--mut);display:flex;align-items:center;gap:6px}
- .grid{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+ .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(380px,1fr));gap:16px}
  @media (max-width:800px){.grid{grid-template-columns:1fr}}
  .card{background:var(--card);border-radius:12px;padding:12px}
  .bar{height:10px;border-radius:6px;background:#8883;overflow:hidden;margin:6px 0}
@@ -103,12 +103,12 @@ DASH_PAGE = """<!doctype html><html><head><meta charset="utf-8">
  plus scores on fixed unseen scenarios. <a href="/play">Watch a finished model</a></div>
 <div class="grid" id="runs" style="margin-top:12px"></div>
 <script>
-const RUNS=%RUNS%, COL=['var(--a)','var(--b)'];
+const RUNS=%RUNS%, COL=['var(--a)','var(--b)','var(--c)'];
 const BASE={L2:0.02,L3:0.12};   // hand-written reactive baseline, collision rate
 const fmt=(x,d=1)=>x==null?'–':x.toFixed(d), pct=x=>x==null?'–':(100*x).toFixed(0)+'%';
 const hrs=h=>h==null?'–':(h<1?Math.round(h*60)+' min':h.toFixed(1)+' h');
 document.getElementById('runs').innerHTML=RUNS.map((r,i)=>`
- <div class="card"><h2 style="color:${COL[i%2]}">${r.title}</h2>
+ <div class="card"><h2 style="color:${COL[i%3]}">${r.title}</h2>
   <img src="/train/${r.id}/stream" alt="live training episode">
   <div class="bar"><i id="bar-${r.id}" style="width:0%"></i></div>
   <div class="kv" id="kv-${r.id}"></div>
@@ -142,7 +142,7 @@ async function poll(){
      <span class="mut">training collisions</span><b>${pct(p.train_collision_rate)} of last ${p.n_recent||0} episodes</b>
      <span class="mut">avg reward / length</span><b>${fmt(p.ep_reward,1)} / ${fmt(p.ep_len_s,1)} s</b>
      <span class="mut">status</span><b>${lag==null?'waiting for first update':(lag>90?'STALE: no update for '+lag+' s':'running')}</b>`;
-   chart(r.id,d.evals||[],p.total||65e6,COL[RUNS.indexOf(r)%2]);
+   chart(r.id,d.evals||[],p.total||65e6,COL[RUNS.indexOf(r)%3]);
    const b=d.best;document.getElementById('best-'+r.id).textContent=b?
     `best so far (step ${fmt(b.steps/1e6,1)}M): level 2 ${pct(b.L2_collision)}, level 3 ${pct(b.L3_collision)} collisions`:'no evaluation yet (first at 1M steps)';
   }catch(e){}
