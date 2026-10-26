@@ -66,7 +66,8 @@ DASH_PAGE = """<!doctype html><html><head><meta charset="utf-8">
 <div class="grid" id="runs" style="margin-top:12px"></div>
 <script>
 const RUNS=%RUNS%, COL=['var(--a)','var(--b)','var(--c)','var(--d)'];
-const BASE={L2:0.02,L3:0.12};   // hand-written reactive baseline, collision rate
+const BASE={L2:0.02,L3:0.12};   // hand-written reactive baseline, collision rate (Crazyflie levels only)
+const DASH={2:[],3:[5,4],4:[2,3],5:[8,3,2,3]};
 const fmt=(x,d=1)=>x==null?'–':x.toFixed(d), pct=x=>x==null?'–':(100*x).toFixed(0)+'%';
 const hrs=h=>h==null?'–':(h<1?Math.round(h*60)+' min':h.toFixed(1)+' h');
 document.getElementById('runs').innerHTML=RUNS.map((r,i)=>`
@@ -80,16 +81,17 @@ document.getElementById('runs').innerHTML=RUNS.map((r,i)=>`
 function chart(id,evals,total,color){
  const c=document.getElementById('ch-'+id),g=c.getContext('2d'),W=c.width,H=c.height,P=34;
  g.clearRect(0,0,W,H);g.font='12px system-ui';g.fillStyle=getComputedStyle(document.body).color;
- const ymax=Math.max(0.5,...evals.map(e=>Math.max(e.L2_collision,e.L3_collision)))*1.05;
+ const lv=[...new Set(evals.flatMap(e=>Object.keys(e).filter(k=>/^L\d_collision$/.test(k)).map(k=>+k[1])))].sort();
+ const ymax=Math.max(0.5,...evals.flatMap(e=>lv.map(l=>e['L'+l+'_collision']||0)))*1.05;
  const X=s=>P+(W-P-8)*s/total,Y=v=>H-P+4-(H-P-14)*v/ymax;
  g.globalAlpha=.35;g.strokeStyle=g.fillStyle;g.beginPath();g.moveTo(P,10);g.lineTo(P,H-P+4);g.lineTo(W-6,H-P+4);g.stroke();
  for(let v=0;v<=ymax;v+=0.1){g.fillText(Math.round(v*100)+'%',2,Y(v)+4)}
  g.globalAlpha=1;g.fillText('training steps',W/2-30,H-6);g.fillText((total/1e6)+'M',W-34,H-P+18);
- for(const [k,key,dash] of [['L2','L2_collision',[]],['L3','L3_collision',[5,4]]]){
-  g.strokeStyle=color;g.lineWidth=2;g.setLineDash(dash);g.beginPath();
-  evals.forEach((e,j)=>{const x=X(e.steps),y=Y(e[key]);j?g.lineTo(x,y):g.moveTo(x,y)});g.stroke();
-  g.setLineDash([2,5]);g.globalAlpha=.5;g.lineWidth=1;g.beginPath();g.moveTo(P,Y(BASE[k]));g.lineTo(W-6,Y(BASE[k]));g.stroke();g.globalAlpha=1}
- g.setLineDash([]);g.fillText('solid = level 2 · dashed = level 3 · dotted = hand-written baseline',P+4,H-18)}
+ for(const l of lv){
+  g.strokeStyle=color;g.lineWidth=2;g.setLineDash(DASH[l]||[]);g.beginPath();
+  evals.forEach((e,j)=>{const x=X(e.steps),y=Y(e['L'+l+'_collision']||0);j?g.lineTo(x,y):g.moveTo(x,y)});g.stroke();
+  if(BASE['L'+l]!=null){g.setLineDash([2,5]);g.globalAlpha=.5;g.lineWidth=1;g.beginPath();g.moveTo(P,Y(BASE['L'+l]));g.lineTo(W-6,Y(BASE['L'+l]));g.stroke();g.globalAlpha=1}}
+ g.setLineDash([]);g.fillText('levels '+lv.join(' / ')+' · line styles differ by level'+(lv.includes(2)||lv.includes(3)?' · dotted = hand-written baseline':''),P+4,H-18)}
 
 async function poll(){
  for(const r of RUNS){
@@ -106,7 +108,7 @@ async function poll(){
      <span class="mut">status</span><b>${lag==null?'waiting for first update':(lag>90?'STALE: no update for '+lag+' s':'running')}</b>`;
    chart(r.id,d.evals||[],p.total||65e6,COL[RUNS.indexOf(r)%4]);
    const b=d.best;document.getElementById('best-'+r.id).textContent=b?
-    `best so far (step ${fmt(b.steps/1e6,1)}M): level 2 ${pct(b.L2_collision)}, level 3 ${pct(b.L3_collision)} collisions`:'no evaluation yet (first at 1M steps)';
+    `best so far (step ${fmt(b.steps/1e6,1)}M): `+Object.keys(b).filter(k=>/^L\d_collision$/.test(k)).map(k=>'level '+k[1]+' '+pct(b[k])).join(', ')+' collisions':'no evaluation yet (first at 1M steps)';
   }catch(e){}
  }
  setTimeout(poll,3000)}

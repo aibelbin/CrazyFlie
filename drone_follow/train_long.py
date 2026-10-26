@@ -30,6 +30,8 @@ from drone_follow.train import CollisionRate
 WARMUP_STEPS = 3_000_000
 WARMUP_MIX = [0, 1, 2, 2, 3, 3, 3]       # difficulty levels cycled over the parallel envs
 MAIN_MIX = [1, 2, 2, 3, 3, 3, 3]
+F450_WARMUP_MIX = [0, 1, 2, 2, 3, 4, 4]          # DF_DRONE=f450: hills, forest and wind enter early
+F450_MAIN_MIX = [1, 2, 3, 4, 4, 5, 5]
 EVAL_SEED0 = 20_000                       # distinct from evaluate.py's seeds (10_000+)
 
 
@@ -39,6 +41,8 @@ class PhaseMixer(BaseCallback):
     def __init__(self, n_envs: int):
         super().__init__()
         self.n_envs, self.phase = n_envs, None
+        self.warmup_mix = F450_WARMUP_MIX if C.F450 else WARMUP_MIX
+        self.main_mix = F450_MAIN_MIX if C.F450 else MAIN_MIX
 
     def _apply(self, mix):
         for i in range(self.n_envs):
@@ -56,15 +60,16 @@ class PhaseMixer(BaseCallback):
         phase = "warmup" if self.num_timesteps < WARMUP_STEPS else "main"
         if phase != self.phase:
             self.phase = phase
-            self._apply(WARMUP_MIX if phase == "warmup" else MAIN_MIX)
+            self._apply(self.warmup_mix if phase == "warmup" else self.main_mix)
             print(f"[{self.num_timesteps}] difficulty mix -> {phase}", flush=True)
 
 
 class BestByCollisions(BaseCallback):
     """Periodically scores the policy on fixed scenarios and keeps the safest checkpoint."""
 
-    def __init__(self, out: str, every: int, episodes: int, levels=(2, 3)):
+    def __init__(self, out: str, every: int, episodes: int, levels=None):
         super().__init__()
+        levels = levels or ((3, 4, 5) if C.F450 else (2, 3))        # the hardest levels of the setup being trained
         self.out, self.every, self.episodes, self.levels = out, every, episodes, levels
         self.envs, self.last, self.best = {}, 0, np.inf
         try:                                    # resuming: keep the best score from before

@@ -3,7 +3,7 @@
     python -m drone_follow.pick_winner [--runs-dir runs] [--prefix exp_]
 
 Reads <run>/final_eval_best.json (200 scenarios per level) and <run>/env.txt (the experiment
-switches). Score (lower is better) = mean collision rate on levels 2-3
+switches). Score (lower is better) = mean collision rate on the levels >= 2 that were evaluated
                                      + 0.05 * mean following error (m)
                                      + 0.005 * mean p95 acceleration (m/s^2).
 Writes <runs-dir>/winner.json. Also prints a table of every run.
@@ -32,21 +32,27 @@ def load(run_dir: str):
     return res, env
 
 
+def levels(res: dict) -> list:
+    return sorted(int(k.split("level")[1]) for k in res if k.startswith("ppo/level"))
+
+
 def score(res: dict) -> float:
-    lv = [res[f"ppo/level{l}"] for l in (2, 3)]
+    lv = [res[f"ppo/level{l}"] for l in levels(res) if l >= 2]
     return float(np.mean([r["collision_rate"] for r in lv])
                  + 0.05 * np.mean([r["mean_follow_error_m"] for r in lv])
                  + 0.005 * np.mean([r["p95_accel_ms2"] for r in lv]))
 
 
 def table(rows: list) -> str:
-    out = [f"{'run':<12}{'rate':>6}{'tilt':>6} | {'L1':>5}{'L2':>5}{'L3':>5} collisions | follow err L2/L3 | accel p95 L2/L3 | score"]
+    lv = levels(rows[0][1]) if rows else []
+    head = "".join(f"{'L' + str(l):>5}" for l in lv)
+    out = [f"{'run':<12}{'rate':>6}{'tilt':>6} | {head} collisions | follow err (last 2 levels) | accel p95 | score"]
     for name, res, env, sc in rows:
-        c = [res[f"ppo/level{l}"] for l in (1, 2, 3)]
-        out.append(f"{name:<12}{env['DF_ACTION_RATE_LIMIT']:>6}{env['DF_R_TILT']:>6} | "
-                   f"{100 * c[0]['collision_rate']:>4.0f}%{100 * c[1]['collision_rate']:>4.0f}%{100 * c[2]['collision_rate']:>4.0f}%"
-                   f"            | {c[1]['mean_follow_error_m']:.2f} / {c[2]['mean_follow_error_m']:.2f}"
-                   f"       | {c[1]['p95_accel_ms2']:.1f} / {c[2]['p95_accel_ms2']:.1f}"
+        c = [res[f"ppo/level{l}"] for l in lv]
+        coll = "".join(f"{100 * x['collision_rate']:>4.0f}%" for x in c)
+        out.append(f"{name:<12}{env['DF_ACTION_RATE_LIMIT']:>6}{env['DF_R_TILT']:>6} | {coll}            "
+                   f"| {c[-2]['mean_follow_error_m']:.2f} / {c[-1]['mean_follow_error_m']:.2f}"
+                   f"       | {c[-2]['p95_accel_ms2']:.1f} / {c[-1]['p95_accel_ms2']:.1f}"
                    f"       | {sc:.3f}")
     return "\n".join(out)
 

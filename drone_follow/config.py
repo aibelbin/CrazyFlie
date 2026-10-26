@@ -10,6 +10,16 @@ DRONE = os.environ.get("DF_DRONE", "cf2x")     # "cf2x" (Crazyflie, library cont
 F450 = DRONE == "f450"
 WIND_MEAN = float(os.environ.get("DF_WIND", "0"))          # m/s steady wind (f450 only)
 WIND_GUST = float(os.environ.get("DF_GUST", "0"))          # m/s gust strength (f450 only)
+# Sensor and link realism (on by default for the F450, off for the Crazyflie so old results stay comparable)
+NOISY = os.environ.get("DF_NOISE", "1" if F450 else "0") == "1"
+SENSOR_DELAY = 2           # control steps (66 ms) of depth-camera / detector latency
+ACT_DELAY = 1 if NOISY else 0   # control steps (33 ms) between the policy's command and the autopilot using it
+RANGE_NOISE = (0.01, 0.005)     # range noise: sigma = 1 % of the range + 5 mm
+RANGE_DROPOUT = 0.01            # chance per ray per step that the depth camera returns nothing (reads max range)
+TARGET_NOISE = 0.08             # m, noise on the detected person's relative position
+TARGET_VEL_NOISE = 0.10         # m/s, noise on the person's estimated velocity
+STATE_VEL_NOISE = 0.05          # m/s, odometry noise on the drone's own velocity
+STATE_ATT_NOISE = 0.01          # rad, attitude noise
 SPEED_LIMIT = 2.5 if F450 else 1.5    # m/s, magnitude of the commanded velocity at |action| = 1
 FOLLOW_ALT = 1.2           # m, altitude of the point the drone tracks above the person
 FOLLOW_DIST = 2.0          # m, desired 3D distance to the follow point

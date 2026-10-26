@@ -15,6 +15,8 @@ Observation (OBS_DIM floats, all roughly in [-1, 1]):
     16:40  range strip (N_RAYS), metres / MAX_RANGE
     40:64  range strip rate of change (closing speed / 2 m/s), clipped
 """
+from collections import deque
+
 import gymnasium as gym
 import numpy as np
 import pybullet as p
@@ -50,6 +52,7 @@ class FollowAvoidAviary(F450Mixin, BaseRLAviary):
         self._first_obs = True
         self._tilt = 0.0
         self._agl = C.FOLLOW_ALT
+        self._reset_sensing()
         super().__init__(
             drone_model=F450 if C.F450 else DroneModel.CF2X, num_drones=1,
             initial_xyzs=self._scenario.drone_start[None, :].copy(),
@@ -94,9 +97,27 @@ class FollowAvoidAviary(F450Mixin, BaseRLAviary):
         self._crashed = False
         self._first_obs = True
         self._f450_reset()
+        self._reset_sensing()
         if C.F450:
             self._f450_set_wind(self._wind_for_level())
         return super().reset(seed=seed, options=options)
+
+    def _reset_sensing(self):
+        self._range_hist = deque(maxlen=C.SENSOR_DELAY + 1)      # true ranges, oldest = what the sensor reports now
+        self._rel_hist = deque(maxlen=C.SENSOR_DELAY + 1)
+        self._range_smooth = None
+        self._act_queue = deque([np.zeros(3)] * C.ACT_DELAY, maxlen=max(C.ACT_DELAY, 1))
+
+    def _sense_ranges(self, true_ranges: np.ndarray) -> np.ndarray:
+        """What the depth camera reports: delayed, noisy, with occasional dropouts, lightly smoothed."""
+        self._range_hist.append(true_ranges)
+        r = self._range_hist[0].copy()
+        rel_sigma, abs_sigma = C.RANGE_NOISE
+        r = r + self._rng.standard_normal(r.shape) * (rel_sigma * r + abs_sigma)
+        r[self._rng.random(r.shape) < C.RANGE_DROPOUT] = C.MAX_RANGE
+        r = np.clip(r, 0.05, C.MAX_RANGE)
+        self._range_smooth = r if self._range_smooth is None else 0.5 * self._range_smooth + 0.5 * r
+        return self._range_smooth.copy()
 
     def _wind_for_level(self):
         """Levels 4-5 are windy (F450 only): 4 = breeze with light gusts, 5 = strong wind with gusts.
@@ -125,7 +146,11 @@ class FollowAvoidAviary(F450Mixin, BaseRLAviary):
             a = self._prev_action + np.clip(a - self._prev_action, -lim, lim)
         self._scenario.advance(self.CTRL_TIMESTEP, self.pos[0], self.vel[0])
         self._action = a
-        out = super().step(a)
+        applied = a
+        if C.ACT_DELAY > 0:                  # the autopilot acts on the command from a step ago
+            self._act_queue.append(a)
+            applied = self._act_queue.popleft()
+        out = super().step(applied)
         self._prev_action = a
         if self._halo is not None:
             p.resetBasePositionAndOrientation(self._halo, self.pos[0].tolist(), [0, 0, 0, 1],
@@ -137,6 +162,8 @@ class FollowAvoidAviary(F450Mixin, BaseRLAviary):
         s = self._getDroneStateVector(0)
         pos, rpy, vel = s[0:3], s[7:10], s[10:13]
         new_ranges = range_scan(self.CLIENT, pos)
+        if C.NOISY:
+            new_ranges = self._sense_ranges(new_ranges)
         self._prev_ranges = new_ranges if self._first_obs else self._ranges
         self._ranges = new_ranges
         self._first_obs = False
@@ -148,12 +175,21 @@ class FollowAvoidAviary(F450Mixin, BaseRLAviary):
                          or abs(rpy[0]) > C.MAX_TILT or abs(rpy[1]) > C.MAX_TILT)
 
         rel = self._scenario.target_point - pos
-        dist = float(np.linalg.norm(rel))
+        dist = float(np.linalg.norm(rel))                 # true distance: used for the reward only
+        person_vel, vel_obs, rpy_obs, rel_obs = self._scenario.person_vel, vel, rpy, rel
+        if C.NOISY:                                       # what the detector, depth camera and odometry report
+            self._rel_hist.append(rel)
+            rng = self._rng
+            rel_obs = self._rel_hist[0] + rng.standard_normal(3) * C.TARGET_NOISE
+            person_vel = person_vel + rng.standard_normal(2) * C.TARGET_VEL_NOISE
+            vel_obs = vel + rng.standard_normal(3) * C.STATE_VEL_NOISE
+            rpy_obs = rpy + rng.standard_normal(3) * C.STATE_ATT_NOISE
+        dist_obs = float(np.linalg.norm(rel_obs))
         rate = np.clip((self._ranges - self._prev_ranges) / self.CTRL_TIMESTEP / 2.0, -1.5, 1.5)
         obs = np.concatenate([
-            rel / (dist + 1e-9), [dist / 8.0],
-            self._scenario.person_vel, [0.0], vel / C.SPEED_LIMIT,
-            rpy[:2], [agl / 3.0], self._prev_action,
+            rel_obs / (dist_obs + 1e-9), [dist_obs / 8.0],
+            person_vel, [0.0], vel_obs / C.SPEED_LIMIT,
+            rpy_obs[:2], [agl / 3.0], self._prev_action,
             self._ranges / C.MAX_RANGE, rate,
         ]).astype(np.float32)
         self._follow_dist = dist

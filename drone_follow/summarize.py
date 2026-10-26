@@ -6,7 +6,7 @@ import argparse
 import glob
 import os
 
-from drone_follow.pick_winner import load, score, table
+from drone_follow.pick_winner import levels, load, score, table
 
 
 def main():
@@ -21,7 +21,7 @@ def main():
     print(table(rows))
     print("\ncrash causes (200 scenarios per level):")
     for name, res, _, _ in rows:
-        for l in (1, 2, 3):
+        for l in levels(res):
             print(f"  {name:<12} L{l}: {res[f'ppo/level{l}'].get('collision_kinds', {})}")
     print("\nreference (200 scenarios, same seeds): ppo_ft 15% / 12% / 22%, rule-based 0% / 2% / 12%")
 
