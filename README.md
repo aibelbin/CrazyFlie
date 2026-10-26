@@ -7,34 +7,12 @@ person is found with a **pretrained YOLO** model. Physics come from
 
 > **Hardware note:** training and other heavy jobs do not run on the laptop (a fanless
 > MacBook Air). Training is done on a remote machine and only the results come back.
-> Running, evaluating a few episodes and the live demo are light and fine locally.
+> Running, evaluating a few episodes and the 3D viewer are light and fine locally.
 
-## Live demo (3D window)
-
-```
-source .venv/bin/activate
-python -m drone_follow.live --model runs/ppo_ft/final.zip
-```
-
-The drone flies in real time with a walking person to follow, drifting debris, walking
-pedestrians and rival drones. Click the window, then:
-
-| Key | Action |
-|---|---|
-| `o` | drop debris between the drone and the person |
-| `r` | launch a rival drone at the drone |
-| `p` | add a walking pedestrian |
-| `1` / `2` / `3` | trained policy / hand-written reactive policy / naive follower |
-| `n` | new episode |
-| `c` | toggle the auto-follow camera |
-
-Colours: person green, drone blue (with trail), debris grey, rival drones red.
-A label over the drone shows `FOLLOW TARGET`, `AVOIDING` or `COLLISION`.
-
-## Web viewer (watch it from a browser)
+## 3D viewer and training dashboard (in the browser)
 
 ```
-python -m drone_follow.web --model runs/ppo_ft/final.zip --port 8765 --runs-dir runs --runs long_a,long_b
+python -m drone_follow.web --model runs/exp_ctrl/final.zip --port 8765 --runs-dir runs
 ```
 
 Open `http://<machine>:8765`:
@@ -42,9 +20,12 @@ Open `http://<machine>:8765`:
   exploring) plus steps, speed, ETA, training collision rate, average reward and a chart of the
   periodic evaluation scores against the hand-written baseline. The worker only renders while the
   page is open.
-- `/play` streams a finished model in its own simulation, with buttons for debris, rival drones,
-  pedestrians, policy switching (trained / reactive / naive), difficulty and camera orbit/zoom.
-  It pauses about 8 s after the last viewer leaves, so an idle server costs nothing. There is no login: only expose it on a network you trust (e.g. a tailnet), or use an SSH
+- `/play` is a **3D scene** (three.js): the finished model flies in the simulation, which runs on the
+  server and streams poses to the browser. F450-style quadcopters with spinning props, walking people,
+  rocks and rival drones, a forest, buildings and hills. Drag to orbit, scroll or pinch to zoom,
+  right-drag to pan. Buttons (or keys `o` debris, `r` rival, `p` pedestrian, `n` new episode,
+  `1/2/3` policy, `c` follow camera) add hazards and switch policy or difficulty.
+  The simulation pauses about 8 s after the last viewer leaves, so an idle server costs nothing. There is no login: only expose it on a network you trust (e.g. a tailnet), or use an SSH
 tunnel: `ssh -L 18765:127.0.0.1:8765 <host>` then open `http://localhost:18765`.
 
 ## How it works
@@ -67,7 +48,7 @@ webcam / video --> YOLO (person) --> world position --+
   commands (all scaled by 0.1). The shaping was added after the first models in the table below, which
   were trained with the simpler reward (proximity + smoothness only).
 - **Hazards:** spheres for debris and rival drones, three-sphere columns for pedestrians
-  (drawn as walking figures in the live demo). The person and scenery are visual only.
+  (drawn as walking figures in the 3D viewer). The person and scenery are visual only.
 - **Difficulty levels:** 0 clear sky, 1 static debris, 2 drifting debris + pedestrians + a
   rival drone, 3 stress (denser debris, more people, two faster rivals).
 
@@ -99,9 +80,9 @@ clearly worse, so `ppo_ft` is the model to use; the cause was not investigated.
 | `drone_follow/policies.py` | naive and reactive baselines |
 | `drone_follow/train.py` | PPO training (curriculum, `--resume`, `--mix`) |
 | `drone_follow/train_long.py` | long run: shaped reward, mixed levels, best-checkpoint selection, time budget (remote machine only) |
-| `drone_follow/web.py` | browser viewer (MJPEG stream + controls) |
+| `drone_follow/web.py` | web server: training dashboard and the 3D viewer's pose stream |
+| `drone_follow/static/` | the three.js viewer (`viewer.html`, `viewer.js`) and its vendored libraries |
 | `drone_follow/evaluate.py` | collision rate / follow error on fixed seeds |
-| `drone_follow/live.py` | live 3-D demo |
 | `drone_follow/demo_sim.py` | side-by-side clips of policies on the same scenario |
 | `drone_follow/demo_webcam.py`, `person_tracker.py` | webcam or video -> YOLO -> simulated drone |
 | `docs/superpowers/specs/` | design spec |

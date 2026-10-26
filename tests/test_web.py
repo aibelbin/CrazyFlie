@@ -64,3 +64,44 @@ def test_dashboard_endpoints(tmp_path):
                 assert e.code == 404
     finally:
         server.shutdown()
+
+
+def test_viewer_page_static_files_and_event_stream(tmp_path):
+    sim = Sim({}, "reactive", 2, 0)
+    handler = make_handler(sim, str(tmp_path), [])
+    server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    base = f"http://127.0.0.1:{server.server_address[1]}"
+    try:
+        page = urllib.request.urlopen(base + "/play").read().decode()
+        assert "/static/viewer.js" in page and "<canvas" in page
+        for name in ("three.min.js", "OrbitControls.js", "viewer.js"):
+            assert len(urllib.request.urlopen(f"{base}/static/{name}").read()) > 1000
+        for bad in ("/static/web.py", "/static/..%2Fweb.py", "/static/nope.js"):
+            try:
+                urllib.request.urlopen(base + bad)
+                raise AssertionError(f"{bad} should 404")
+            except urllib.error.HTTPError as e:
+                assert e.code == 404
+        with sim.cond:                                    # publish one snapshot, then read it as an event
+            sim.state, sim.frame_no = json.dumps({"ep": 1, "status": "FOLLOW TARGET"}), 1
+        stream = urllib.request.urlopen(base + "/events", timeout=5)
+        line = stream.readline().decode()
+        assert line.startswith("data: ") and json.loads(line[6:])["ep"] == 1
+        stream.close()
+    finally:
+        server.shutdown()
+
+
+def test_publish_snapshot_has_everything_the_viewer_draws():
+    env = make_env(difficulty=3, seed=2)()
+    env.reset(seed=2)
+    for _ in range(5):
+        env.step(np.zeros(3))
+    sim = Sim({}, "reactive", 3, 2)
+    sim.publish(env.unwrapped)
+    msg = json.loads(sim.state)
+    assert len(msg["drone"]["p"]) == 3 and len(msg["drone"]["q"]) == 4 and len(msg["person"]["p"]) == 2
+    assert {o["k"] for o in msg["obs"]} >= {"debris", "pedestrian"}
+    assert all(set(o) >= {"id", "p", "v", "r", "a", "g"} for o in msg["obs"])
+    env.close()

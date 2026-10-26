@@ -5,7 +5,8 @@
     # then open http://<this machine>:8765
 
   /       training dashboard: each run's live training episode plus progress and score charts
-  /play   a finished model flying in its own simulation, with buttons to add hazards
+  /play   a finished model flying in a 3D browser scene (three.js), with buttons to add hazards.
+          The simulation runs here and streams poses (server-sent events); the browser draws them.
 
 The training frames come from one worker per run, which only renders while this page is open
 (it checks a `watch` file this server touches). The /play simulation pauses a few seconds after
@@ -20,17 +21,15 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-import cv2
-
 from drone_follow import config as C
-from drone_follow.drone_visual import DroneVisual
 from drone_follow.env import FollowAvoidAviary, SingleDroneWrapper
 from drone_follow.policies import naive_follow, reactive_follow, smoothed
-from drone_follow.render import render_frame, status_from
+from drone_follow.render import status_from
 
 IDLE_AFTER_S = 8.0
-FRAME_W, FRAME_H = 800, 450
-RENDER_EVERY = 2                      # render every 2nd 30 Hz control step (15 fps)
+STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
+STATIC_TYPES = {"three.min.js": "text/javascript", "OrbitControls.js": "text/javascript",
+                "viewer.js": "text/javascript", "viewer.html": "text/html; charset=utf-8"}
 
 STYLE = """
  :root{color-scheme:dark light;--bg:#0f1115;--fg:#e8eaed;--card:#1a1d24;--acc:#4c8dff;--mut:#9aa0a6;
@@ -56,51 +55,12 @@ STYLE = """
  .kv b{font-weight:600} canvas{width:100%;height:170px;display:block}
 """
 
-PLAY_PAGE = """<!doctype html><html><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Drone follow and avoid: play</title><style>%STYLE%</style></head><body><main>
-<h1>Finished model <span id="st" class="mut"></span></h1>
-<div class="mut"><a href="/">&larr; training dashboard</a></div>
-<img id="v" src="/stream" alt="live simulation">
-<div class="row">
- <button onclick="act('debris')">Drop debris</button>
- <button onclick="act('rival')">Rival drone</button>
- <button onclick="act('pedestrian')">Add pedestrian</button>
- <button onclick="act('new')">New episode</button>
-</div>
-<div class="row" id="pol">
- <button data-p="trained" onclick="pol('trained')">Trained</button>
- <button data-p="reactive" onclick="pol('reactive')">Reactive (rules)</button>
- <button data-p="naive" onclick="pol('naive')">Naive (crashes)</button>
- <label>Difficulty <select id="diff" onchange="act('difficulty/'+this.value)">
-  <option>0</option><option>1</option><option selected>2</option><option>3</option></select></label>
-</div>
-<div class="row">
- <label>Orbit <input id="az" type="range" min="0" max="360" value="225" oninput="cam()"></label>
- <label>Height <input id="el" type="range" min="8" max="80" value="27" oninput="cam()"></label>
- <label>Zoom <input id="di" type="range" min="3" max="16" value="7" step="0.5" oninput="cam()"></label>
-</div>
-<script>
-const post=p=>fetch('/api/'+p,{method:'POST'});
-const act=p=>post(p);
-const pol=p=>post('policy/'+p);
-let t=null;
-function cam(){clearTimeout(t);t=setTimeout(()=>post('cam?az='+az.value+'&el='+el.value+'&d='+di.value),60)}
-async function poll(){
- try{const s=await (await fetch('/api/state')).json();
-  st.textContent='· '+s.status+' · '+s.policy+' · '+s.episodes+' episodes, '+s.collisions+' collisions';
-  document.querySelectorAll('#pol button').forEach(b=>b.classList.toggle('on',b.dataset.p===s.policy));
- }catch(e){}
- setTimeout(poll,1000)}
-poll();
-</script></main></body></html>""".replace("%STYLE%", STYLE)
-
 DASH_PAGE = """<!doctype html><html><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Drone training dashboard</title><style>%STYLE%</style></head><body><main>
 <h1>Drone follow-and-avoid: training</h1>
 <div class="mut">Live episodes from one training worker per run (random exploration early on, sped up),
- plus scores on fixed unseen scenarios. <a href="/play">Watch a finished model</a></div>
+ plus scores on fixed unseen scenarios. <a href="/play">Watch a finished model in 3D</a></div>
 <div class="grid" id="runs" style="margin-top:12px"></div>
 <script>
 const RUNS=%RUNS%, COL=['var(--a)','var(--b)','var(--c)','var(--d)'];
@@ -152,37 +112,52 @@ poll();
 </script></main></body></html>"""
 
 
+def _r(v, n=3):
+    return [round(float(x), n) for x in v]
+
+
 class Sim:
-    """Owns the /play simulation. Only its own thread touches PyBullet; handlers send commands."""
+    """Owns the /play simulation. Only its own thread touches PyBullet; handlers send commands.
+    Each control step it publishes a JSON snapshot of every pose for the browser to draw."""
 
     def __init__(self, policies: dict, current: str, difficulty: int, seed: int):
         self.policies, self.current = policies, current
         self.difficulty, self.seed = difficulty, seed
         self.cmds: queue.Queue = queue.Queue()
         self.cond = threading.Condition()
-        self.jpeg, self.frame_no = b"", 0
+        self.state, self.frame_no = "", 0
         self.last_seen = 0.0                      # starts idle until someone opens /play
-        self.cam = (225.0, 27.0, 7.0)
         self.status, self.episodes, self.collisions = "STARTING", 0, 0
+        self.episode_id = 0
 
     def touch(self):
         self.last_seen = time.time()
 
+    def publish(self, sim):
+        sc = sim.scenario
+        obs = [{"id": i, "k": o.kind, "p": _r(o.pos), "v": _r(o.vel), "r": round(float(o.radius), 3),
+                "a": int(o.active), "g": o.group} for i, o in enumerate(sc.obstacles)]
+        msg = {"ep": self.episode_id, "drone": {"p": _r(sim.pos[0]), "q": _r(sim.quat[0], 4), "v": _r(sim.vel[0])},
+               "person": {"p": _r(sc.person), "v": _r(sc.person_vel)}, "obs": obs,
+               "status": self.status, "policy": self.current, "difficulty": self.difficulty,
+               "episodes": self.episodes, "collisions": self.collisions}
+        with self.cond:
+            self.state, self.frame_no = json.dumps(msg, separators=(",", ":")), self.frame_no + 1
+            self.cond.notify_all()
+
     def run(self):
         env = SingleDroneWrapper(FollowAvoidAviary(
-            gui=False, difficulty=self.difficulty, seed=self.seed, episode_sec=1e9, realistic=True))
+            gui=False, difficulty=self.difficulty, seed=self.seed, episode_sec=1e9))
         sim = env.unwrapped
-        visual = None
 
         def new_episode():
-            nonlocal visual
+            self.episode_id += 1
             obs, _ = env.reset()
-            visual = DroneVisual(sim.CLIENT, int(sim.DRONE_IDS[0]))
-            visual.update()
+            self.status = "FOLLOW TARGET"
             return obs
 
         obs = new_episode()
-        step, hold = 0, 0
+        hold = 0
         while True:
             t0 = time.perf_counter()
             if time.time() - self.last_seen > IDLE_AFTER_S:      # nobody watching: sleep
@@ -209,21 +184,12 @@ class Sim:
                     obs = new_episode()
             else:
                 obs, _, term, trunc, info = env.step(self.policies[self.current](obs))
-                visual.update()
                 self.status = status_from(info, term)
                 if term or trunc:
                     self.episodes += 1
                     self.collisions += int(info["collision"])
                     hold = C.CTRL_FREQ * 3 // 2                   # linger on the crash for 1.5 s
-            step += 1
-            if step % RENDER_EVERY == 0:
-                img = render_frame(sim, FRAME_W, FRAME_H, status=self.status,
-                                   title=f"policy: {self.current}   level {self.difficulty}", cam=self.cam)
-                ok, buf = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 72])
-                if ok:
-                    with self.cond:
-                        self.jpeg, self.frame_no = buf.tobytes(), self.frame_no + 1
-                        self.cond.notify_all()
+            self.publish(sim)
             time.sleep(max(0.0, 1.0 / C.CTRL_FREQ - (time.perf_counter() - t0)))
 
 
@@ -286,6 +252,13 @@ def make_handler(sim: Sim, runs_dir: str, runs: list):
             self.wfile.write(b"--frame\r\nContent-Type: image/jpeg\r\nContent-Length: "
                              + str(len(jpeg)).encode() + b"\r\n\r\n" + jpeg + b"\r\n")
 
+        def _static(self, name: str):
+            if name not in STATIC_TYPES:
+                self._send(404, b"not found", "text/plain")
+                return
+            with open(os.path.join(STATIC_DIR, name), "rb") as f:
+                self._send(200, f.read(), STATIC_TYPES[name])
+
         def do_GET(self):
             path = self.path.split("?")[0]
             parts = path.strip("/").split("/")
@@ -294,29 +267,30 @@ def make_handler(sim: Sim, runs_dir: str, runs: list):
                 self._send(200, dash_page().encode(), "text/html; charset=utf-8")
             elif path == "/play":
                 sim.touch()
-                self._send(200, PLAY_PAGE.encode(), "text/html; charset=utf-8")
+                self._static("viewer.html")
+            elif len(parts) == 2 and parts[0] == "static":
+                self._static(parts[1])
             elif path == "/api/state":
                 sim.touch()
                 self._send(200, json.dumps({
                     "status": sim.status, "policy": sim.current, "episodes": sim.episodes,
                     "collisions": sim.collisions}).encode())
-            elif path == "/snapshot.jpg":
-                sim.touch()
-                with sim.cond:
-                    sim.cond.wait_for(lambda: sim.frame_no > 0, timeout=15)
-                self._send(200 if sim.jpeg else 503, sim.jpeg, "image/jpeg")
-            elif path == "/stream":
-                self._mjpeg_headers()
+            elif path == "/events":                       # server-sent events: one pose snapshot per step
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream")
+                self.send_header("Cache-Control", "no-store")
+                self.send_header("X-Accel-Buffering", "no")
+                self.end_headers()
                 last = -1
                 try:
                     while True:
                         with sim.cond:
                             sim.cond.wait_for(lambda: sim.frame_no != last, timeout=5)
-                            jpeg, last = sim.jpeg, sim.frame_no
+                            data, last = sim.state, sim.frame_no
                         sim.touch()
-                        if jpeg:
-                            self._frame(jpeg)
-                except (BrokenPipeError, ConnectionResetError):
+                        self.wfile.write(b"data: " + data.encode() + b"\n\n" if data else b": keepalive\n\n")
+                        self.wfile.flush()
+                except (BrokenPipeError, ConnectionResetError, OSError):
                     pass
             elif len(parts) == 3 and parts[0] == "train" and parts[1] in run_ids and parts[2] == "progress":
                 d = os.path.join(runs_dir, parts[1])
@@ -357,15 +331,8 @@ def make_handler(sim: Sim, runs_dir: str, runs: list):
 
         def do_POST(self):
             sim.touch()
-            path, _, query = self.path.partition("?")
-            if path == "/api/cam":
-                q = dict(kv.split("=") for kv in query.split("&") if "=" in kv)
-                try:
-                    sim.cam = (float(q["az"]), min(max(float(q["el"]), 5.0), 85.0),
-                               min(max(float(q["d"]), 2.0), 20.0))
-                except (KeyError, ValueError):
-                    pass
-            elif path.startswith("/api/"):
+            path = self.path.partition("?")[0]
+            if path.startswith("/api/"):
                 cmd = path[len("/api/"):]
                 if cmd.startswith("difficulty/"):
                     sim.difficulty = min(max(int(cmd.split("/")[1] or 2), 0), 3)

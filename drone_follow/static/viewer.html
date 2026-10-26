@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Drone follow and avoid</title>
+<style>
+  :root{--glass:rgba(16,19,26,.72);--fg:#eef1f6;--mut:#a3abb8;--acc:#4c8dff;--ok:#38c172;--warn:#ff9f1a;--bad:#ef4444;
+        --gut:max(16px,env(safe-area-inset-left))}
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%;background:#9ec3e6;color:var(--fg);font:14px/1.35 system-ui,-apple-system,sans-serif;overflow:hidden}
+  canvas{display:block;width:100%;height:100%;touch-action:none}
+  .glass{background:var(--glass);backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);border:1px solid #ffffff1c;border-radius:12px}
+  #top{position:fixed;top:12px;left:var(--gut);right:var(--gut);display:flex;gap:10px;align-items:flex-start;justify-content:space-between;pointer-events:none}
+  #chip{pointer-events:auto;padding:10px 14px;display:flex;align-items:center;gap:10px;min-width:0}
+  #dot{width:12px;height:12px;border-radius:50%;background:var(--ok);flex:none;box-shadow:0 0 0 4px #38c17233}
+  #label{font-weight:650;letter-spacing:.02em}
+  #meta{color:var(--mut);font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  #nav{pointer-events:auto;padding:10px 14px;font-size:13px;white-space:nowrap}
+  #nav a{color:var(--acc);text-decoration:none}
+  #bar{position:fixed;left:var(--gut);right:var(--gut);bottom:max(12px,env(safe-area-inset-bottom));padding:10px;display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+  button,select{background:#ffffff14;color:var(--fg);border:1px solid #ffffff26;border-radius:9px;padding:9px 12px;font:inherit;cursor:pointer}
+  button:hover{background:#ffffff24} button:active{background:var(--acc)}
+  button.on{outline:2px solid var(--acc)}
+  select option{color:#111}
+  .grp{display:flex;gap:6px;flex-wrap:wrap;align-items:center}
+  .sep{width:1px;height:26px;background:#ffffff26;margin:0 2px}
+  #hint{position:fixed;right:var(--gut);bottom:calc(max(12px,env(safe-area-inset-bottom)) + 74px);padding:6px 10px;color:var(--mut);font-size:12px;pointer-events:none}
+  #flash{position:fixed;inset:0;pointer-events:none;box-shadow:inset 0 0 120px 20px #ef4444;opacity:0;transition:opacity .5s}
+  @media (max-width:640px){#hint{display:none}#meta{display:none}.sep{display:none}}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="flash"></div>
+<div id="top">
+  <div id="chip" class="glass"><span id="dot"></span><div><div id="label">CONNECTING</div><div id="meta"></div></div></div>
+  <div id="nav" class="glass"><a href="/">Training dashboard</a></div>
+</div>
+<div id="hint" class="glass">drag to orbit · scroll or pinch to zoom · right-drag to pan</div>
+<div id="bar" class="glass">
+  <div class="grp">
+    <button data-act="debris">Drop debris</button>
+    <button data-act="rival">Rival drone</button>
+    <button data-act="pedestrian">Add pedestrian</button>
+    <button data-act="new">New episode</button>
+  </div>
+  <span class="sep"></span>
+  <div class="grp" id="pol">
+    <button data-pol="trained">Trained</button>
+    <button data-pol="reactive">Reactive</button>
+    <button data-pol="naive">Naive</button>
+  </div>
+  <span class="sep"></span>
+  <div class="grp">
+    <select id="diff" aria-label="difficulty">
+      <option value="0">Level 0 · clear</option><option value="1">Level 1 · static</option>
+      <option value="2" selected>Level 2 · moving</option><option value="3">Level 3 · stress</option>
+    </select>
+    <button id="follow" class="on">Follow cam</button>
+    <button id="trail" class="on">Trail</button>
+  </div>
+</div>
+<script src="/static/three.min.js"></script>
+<script src="/static/OrbitControls.js"></script>
+<script src="/static/viewer.js"></script>
+</body>
+</html>

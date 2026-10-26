@@ -126,13 +126,6 @@ def test_pedestrians_never_start_on_the_drone():
                 assert gap > 0.5
 
 
-def test_key_char_handles_special_and_unknown_keys():
-    from drone_follow.live import key_char
-    assert key_char(ord("o")) == "o" and key_char(ord("3")) == "3"
-    for weird in (-1, 0, 27, 65296, 2**40, -2**31):          # arrows, shift, unknown codes
-        assert key_char(weird) == ""
-
-
 def test_hazard_terms_rise_for_a_hazard_on_a_collision_course():
     env = make_env(difficulty=0, seed=6)()
     env.reset(seed=6)
