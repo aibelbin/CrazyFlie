@@ -48,6 +48,13 @@ def test_bendy_ruler_goes_around_a_tall_narrow_obstacle():
     assert abs(a[1]) > 0.3 and a[0] > 0
 
 
+def test_bendy_ruler_needs_lookahead_plus_margin_to_call_a_direction_open():
+    obs = make_obs(blocked=[(25, set(ELEVS), 11.0)])           # forward reads 11 m: past lookahead, short of +margin
+    a = BendyRuler()(obs)
+    assert abs(a[1]) > 0.3 or a[2] > 0
+    assert BendyRuler(margin=0.0)(obs) == pytest.approx(straight_line(obs))
+
+
 def test_bendy_ruler_slows_down_when_everything_is_blocked():
     obs = make_obs(blocked=[(180, {-35.0, -15.0, 0.0, 15.0, 35.0}, 4.0)])
     assert np.linalg.norm(BendyRuler()(obs)) < 0.35

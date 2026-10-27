@@ -44,11 +44,13 @@ def potential_field(obs: np.ndarray, influence: float = 6.0, gain: float = 1.5) 
 class BendyRuler:
     """ArduPilot's BendyRuler, simplified to the sensor rays. Every ray not pointing steeply down is a candidate
     direction; it is open if it and its two azimuth neighbours (so the gap fits the drone) see at least
-    `lookahead` metres. Fly the open one closest to the waypoint direction, keeping the previous choice unless
-    another is more than `hysteresis_deg` closer, so it does not flip between two gaps."""
+    `lookahead + margin` metres (13 m by default, just above the Supervisor's 12 m trigger). Fly the open one
+    closest to the waypoint direction, keeping the previous choice unless another is more than `hysteresis_deg`
+    closer, so it does not flip between two gaps."""
 
-    def __init__(self, lookahead: float = 10.0, hysteresis_deg: float = 10.0, min_elev: float = -15.0):
-        self.lookahead, self.hysteresis_deg, self.min_elev = lookahead, hysteresis_deg, min_elev
+    def __init__(self, lookahead: float = 10.0, hysteresis_deg: float = 10.0, min_elev: float = -15.0,
+                 margin: float = 3.0):
+        self.lookahead, self.hysteresis_deg, self.min_elev, self.margin = lookahead, hysteresis_deg, min_elev, margin
         self.reset()
 
     def reset(self):
@@ -58,7 +60,7 @@ class BendyRuler:
         r = ranges(obs).reshape(len(ELEVS), N_AZ)
         free = np.minimum(r, np.minimum(np.roll(r, 1, axis=1), np.roll(r, -1, axis=1))).flatten()
         allowed = RAY_ELEV >= self.min_elev
-        open_ = allowed & (free >= self.lookahead)
+        open_ = allowed & (free >= self.lookahead + self.margin)
         if not open_.any():                                          # boxed in: creep toward the most open direction
             i = int(np.argmax(np.where(allowed, free, -1.0)))
             self._last = None
