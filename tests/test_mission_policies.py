@@ -3,7 +3,7 @@ import pytest
 
 from drone_follow import config as C
 from drone_follow.mission_env import M_OBS_DIM, M_RANGES
-from drone_follow.mission_policies import CRUISE, BendyRuler, Supervisor, potential_field, straight_line
+from drone_follow.mission_policies import CONE_ELEVS, CRUISE, BendyRuler, Supervisor, potential_field, straight_line
 
 ELEVS = np.array(C.MISSION_ELEVS_DEG)
 N_AZ = C.MISSION_N_AZ
@@ -34,6 +34,11 @@ def test_potential_field_pushes_away_from_an_obstacle_on_the_left():
     obs[M_RANGES] = r.flatten()
     a = potential_field(obs)
     assert a[1] < 0 and a[0] > 0
+
+
+def test_potential_field_never_pushes_down_or_up():
+    obs = make_obs(blocked=[(30, {15.0, 35.0}, 2.0)])          # something close overhead-ahead
+    assert potential_field(obs)[2] == pytest.approx(0.0)
 
 
 def test_bendy_ruler_climbs_over_a_low_wide_wall():
@@ -75,4 +80,31 @@ def test_supervisor_hands_over_and_back_with_hysteresis():
     assert sup.guided
     for _ in range(3):                                                # hold_s = 0.1 s = 3 control steps
         sup(make_obs())
+    assert not sup.guided
+
+
+def test_supervisor_cone_is_level_and_first_up_ring_only():
+    assert list(CONE_ELEVS) == [0.0, 15.0]
+    sup = Supervisor(lambda obs: np.array([0.0, 0.7, 0.0]))
+    sup.reset()
+    sup(make_obs(blocked=[(45, {-35.0, -15.0}, 6.0)]))                # the ground ahead and below: not a trigger
+    assert not sup.guided
+    sup(make_obs(blocked=[(60, {35.0}, 6.0)]))                         # steeply up: not a trigger
+    assert not sup.guided
+    sup(make_obs(blocked=[(45, {15.0}, 8.0)]))
+    assert sup.guided
+
+
+def test_supervisor_hands_back_only_when_the_whole_trigger_cone_is_clear():
+    sup = Supervisor(lambda obs: np.array([0.0, 0.7, 0.0]), hold_s=0.1)
+    sup.reset()
+    sup(make_obs(blocked=[(30, {0.0}, 8.0)]))
+    assert sup.guided
+    edge = make_obs(blocked=[(45, {0.0}, 14.0)])                      # 45 deg off still under trigger + margin
+    for _ in range(10):
+        sup(edge)
+    assert sup.guided
+    ground = make_obs(blocked=[(45, {-15.0, -35.0}, 8.0)])            # only the ground is near: hand back
+    for _ in range(3):
+        sup(ground)
     assert not sup.guided

@@ -32,11 +32,15 @@ def straight_line(obs: np.ndarray) -> np.ndarray:
 
 
 def potential_field(obs: np.ndarray, influence: float = 6.0, gain: float = 1.5) -> np.ndarray:
-    """Attraction to the waypoint plus a push away from every ray closer than `influence` metres.
-    Downward rays are ignored so level ground does not lift the drone."""
+    """A classic 2D potential field: attraction to the waypoint plus a horizontal push away from every ray
+    closer than `influence` metres. Downward rays are ignored so level ground does not lift the drone, and the
+    push has no vertical part (rays tilted up would otherwise press it toward the ground): it goes around
+    obstacles and never climbs over them."""
     push = np.clip((influence - ranges(obs)) / influence, 0.0, 1.0) ** 2
     push[RAY_ELEV < 0] = 0.0
-    a = straight_line(obs) - gain * (push[:, None] * M_RAY_DIRS).sum(axis=0)
+    rep = (push[:, None] * M_RAY_DIRS).sum(axis=0)
+    rep[2] = 0.0
+    a = straight_line(obs) - gain * rep
     n = float(np.linalg.norm(a))
     return a / n if n > 1.0 else a
 
@@ -77,18 +81,21 @@ class BendyRuler:
         return CRUISE * M_RAY_DIRS[best]
 
 
+CONE_ELEVS = ELEVS[ELEVS >= 0][:2]          # the level ring and the first one up (0 and 15 deg)
+
+
 class Supervisor:
-    """ArduPilot-style handover. AUTO: fly straight at the waypoint. Switch to GUIDED (the avoider) when any ray
-    within `cone_deg` of the waypoint direction (and not pointing steeply down) reads under `trigger` metres.
-    Hand back to AUTO once the rays straight ahead (|azimuth| <= 22.5 deg, elevation -15 or 0) have all read over
-    `trigger + margin` for `hold_s` seconds."""
+    """ArduPilot-style handover. AUTO: fly straight at the waypoint. Switch to GUIDED (the avoider) when any
+    sector of the trigger cone reads under `trigger` metres. The cone is |azimuth| <= `cone_deg` at the level
+    and first upward elevations (CONE_ELEVS: 0 and 15 deg); downward sectors are left out because at cruise
+    height they see the ground (terrain), not obstacles. Hand back to AUTO once the same cone has read over
+    `trigger + margin` for `hold_s` seconds (one mask for both, so it does not re-trigger at once)."""
 
     def __init__(self, avoider, trigger: float = 12.0, margin: float = 3.0, hold_s: float = 0.5,
                  cone_deg: float = 45.0):
         self.avoider, self.trigger, self.margin = avoider, trigger, margin
         self.hold = max(1, int(round(hold_s * C.CTRL_FREQ)))
-        self.cone = (np.abs(RAY_AZ) <= cone_deg) & (RAY_ELEV >= -15.0)
-        self.ahead = (np.abs(RAY_AZ) <= 22.5) & np.isin(RAY_ELEV, (-15.0, 0.0))
+        self.cone = (np.abs(RAY_AZ) <= cone_deg) & np.isin(RAY_ELEV, CONE_ELEVS)
         self.reset()
 
     def reset(self):
@@ -104,7 +111,7 @@ class Supervisor:
                 if hasattr(self.avoider, "reset"):
                     self.avoider.reset()
         else:
-            self._clear = self._clear + 1 if (r[self.ahead] > self.trigger + self.margin).all() else 0
+            self._clear = self._clear + 1 if (r[self.cone] > self.trigger + self.margin).all() else 0
             if self._clear >= self.hold:
                 self.guided = False
         return np.asarray(self.avoider(obs), float).reshape(3) if self.guided else straight_line(obs)
