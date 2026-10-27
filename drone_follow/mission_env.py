@@ -4,7 +4,13 @@ Always the F450 (ArduPilot-style velocity controller, motor lag, wind) with sens
 command delay, whatever DF_DRONE says: this is the drone the missions will fly.
 
 Everything the policy sees and commands is in the *track frame*: x points horizontally at the waypoint,
-z is up, like a drone that yaws to face its next waypoint (ArduPilot's default). Rays are cast in that frame.
+z is up, like a drone that yaws to face its next waypoint (ArduPilot's default).
+
+Ranges model a dense depth sensor reduced to proximity sectors (like ArduPilot's): each of the 80 directions
+is a sector (azimuth +-11.25 deg around its ray; elevation split halfway between MISSION_ELEVS_DEG, the outer
+bins open-ended). A sector reads the nearest of its ray cast and of every obstacle whose closest surface
+point lies inside it, so thin poles and canopy edges between rays are not missed. Terrain is seen by the
+rays only. The true readings then go through the RangeSensor (delay, noise, dropouts, smoothing).
 
 Observation (M_OBS_DIM floats):
     0        horizontal distance to the waypoint / 100, capped at 1.5
@@ -12,8 +18,8 @@ Observation (M_OBS_DIM floats):
     2:5      drone velocity (track frame) / MISSION_SPEED_LIMIT
     5:7      roll, pitch
     7        height above the ground / 10
-    8:11     previous action (track frame)
-    11:91    ranges / MISSION_RANGE (elevation-major: index = e * MISSION_N_AZ + k, k = 0 straight ahead)
+    8:11     the command just issued (track frame; the autopilot applies it MISSION_ACT_DELAY steps later)
+    11:91    sector ranges / MISSION_RANGE (elevation-major: index = e * MISSION_N_AZ + k, k = 0 straight ahead)
     91:171   range rate of change (closing speed / 5 m/s), clipped to [-1.5, 1.5]
 """
 from collections import deque
@@ -36,6 +42,29 @@ M_OBS_DIM = 11 + 2 * M_N_RAYS
 M_PREV_ACTION = slice(8, 11)
 M_RANGES = slice(11, 11 + M_N_RAYS)
 LEVEL_OR_UP = np.repeat(np.array(C.MISSION_ELEVS_DEG) >= 0, C.MISSION_N_AZ)     # rays that do not look down
+_ELEVS = np.array(C.MISSION_ELEVS_DEG)
+EL_EDGES = (_ELEVS[1:] + _ELEVS[:-1]) / 2         # elevation bin edges, halfway between the ray elevations
+AZ_STEP = 360.0 / C.MISSION_N_AZ
+
+
+def sector_index(v: np.ndarray) -> np.ndarray:
+    """Sector (elevation-major ray index) of each track-frame vector in `v` (N, 3)."""
+    v = np.asarray(v, float).reshape(-1, 3)
+    el = np.degrees(np.arctan2(v[:, 2], np.hypot(v[:, 0], v[:, 1])))
+    az = np.degrees(np.arctan2(v[:, 1], v[:, 0]))
+    k = np.floor((az + AZ_STEP / 2) / AZ_STEP).astype(int) % C.MISSION_N_AZ
+    e = np.searchsorted(EL_EDGES, el)
+    return e * C.MISSION_N_AZ + k
+
+
+def sector_ranges(v: np.ndarray, max_range: float = C.MISSION_RANGE) -> np.ndarray:
+    """Per-sector minimum length of the track-frame vectors `v` (N, 3); `max_range` where a sector has none."""
+    v = np.asarray(v, float).reshape(-1, 3)
+    d = np.linalg.norm(v, axis=1)
+    out = np.full(M_N_RAYS, float(max_range))
+    near = d < max_range
+    np.minimum.at(out, sector_index(v[near]), d[near])
+    return out
 
 
 def yaw_matrix(yaw: float) -> np.ndarray:
@@ -92,7 +121,7 @@ class MissionAviary(F450Mixin, BaseRLAviary):
         self._dist = self._prev_dist = None
         self._path, self._last_pos = 0.0, None
         self._sense = RangeSensor(self._rng, C.MISSION_RANGE)
-        self._act_queue = deque([np.zeros(3)] * C.MISSION_ACT_DELAY, maxlen=C.MISSION_ACT_DELAY)
+        self._act_queue = deque([np.zeros(3)] * C.MISSION_ACT_DELAY, maxlen=max(C.MISSION_ACT_DELAY, 1))
 
     def reset(self, seed=None, options=None):
         if seed is not None:
@@ -109,9 +138,12 @@ class MissionAviary(F450Mixin, BaseRLAviary):
 
     def step(self, action):
         a = np.clip(np.asarray(action, float).reshape(3), -1.0, 1.0)
-        self._action = a
-        self._act_queue.append(a)            # the autopilot acts on the command from a step ago
-        out = super().step(self._act_queue.popleft())
+        self._action = a                     # observed (obs[8:11]) as the command just issued
+        applied = a
+        if C.MISSION_ACT_DELAY > 0:          # the autopilot acts on the command from MISSION_ACT_DELAY steps ago
+            applied = self._act_queue.popleft()
+            self._act_queue.append(a)
+        out = super().step(applied)
         self._prev_action = a
         return out
 
@@ -124,7 +156,11 @@ class MissionAviary(F450Mixin, BaseRLAviary):
         if np.linalg.norm(to_goal[:2]) > 0.5:      # right at the waypoint the heading is undefined: keep the last
             self._yaw = float(np.arctan2(to_goal[1], to_goal[0]))
         R = yaw_matrix(self._yaw)
-        ranges = self._sense(cast(self.CLIENT, pos, M_RAY_DIRS @ R.T, C.MISSION_RANGE, C.MISSION_RAY_START))
+        true = cast(self.CLIENT, pos, M_RAY_DIRS @ R.T, C.MISSION_RANGE, C.MISSION_RAY_START)
+        pts = leg.closest_points(pos)
+        if len(pts):                               # world -> track frame: row vectors times R
+            true = np.minimum(true, sector_ranges((pts - pos) @ R, C.MISSION_RANGE))
+        ranges = self._sense(true)
         self._prev_ranges = ranges if self._first_obs else self._ranges
         self._ranges, self._first_obs = ranges, False
 
@@ -145,7 +181,7 @@ class MissionAviary(F450Mixin, BaseRLAviary):
         obs = np.concatenate([
             [min(float(np.linalg.norm(to_goal[:2])) / 100.0, 1.5), to_goal[2] / 10.0],
             (R.T @ vel_obs) / C.MISSION_SPEED_LIMIT, rpy_obs[:2], [self._agl / 10.0],
-            self._prev_action, self._ranges / C.MISSION_RANGE, rate,
+            self._action, self._ranges / C.MISSION_RANGE, rate,
         ]).astype(np.float32)
         return obs[None, :]
 
@@ -174,15 +210,18 @@ class MissionAviary(F450Mixin, BaseRLAviary):
         near = float(self._ranges[LEVEL_OR_UP].min())
         r -= C.MR_PROXIMITY * float(np.clip((C.MR_PROXIMITY_START - near) / C.MR_PROXIMITY_START, 0.0, 1.0)) ** 2
         r -= C.MR_SMOOTH * float(np.linalg.norm(self._action - self._prev_action))
+        r -= C.MR_TIME
         if self._failure():
             r += C.MR_FAIL
         return r
 
     def _computeTerminated(self):
-        return bool(self._crashed or self._success)
+        """Crash, success, or leaving the corridor / climbing over the ceiling (a real end state, not a cutoff)."""
+        return bool(self._crashed or self._success or self._failure() == "out_of_bounds")
 
     def _computeTruncated(self):
-        return bool(not self._crashed and not self._success and self._failure())
+        """Timeout only."""
+        return bool(not self._crashed and not self._success and self._failure() == "timeout")
 
     def _collision_kind(self):
         if not self._crashed:

@@ -85,3 +85,4 @@ MR_FAIL = -10.0                 # timeout, leaving the corridor or climbing abov
 MR_PROXIMITY = 0.05             # per step at worst, for level or upward rays closer than MR_PROXIMITY_START
 MR_PROXIMITY_START = 3.0        # m
 MR_SMOOTH = 0.02                # per unit of command change
+MR_TIME = 0.005                 # per step, so hovering in place (stalling) is never free

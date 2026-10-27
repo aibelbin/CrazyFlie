@@ -89,6 +89,25 @@ class Leg:
         out.append(np.where((d > 0).any(axis=1), np.linalg.norm(np.maximum(d, 0.0), axis=1), d.max(axis=1, initial=-np.inf)))
         return np.concatenate(out), self.sphere_kind + self.cylinder_kind + self.box_kind
 
+    def closest_points(self, pos: np.ndarray) -> np.ndarray:
+        """The point on every obstacle's surface closest to `pos`, (N, 3), in the same order as `gaps()`.
+        |point - pos| = max(gap, 0) (inside an obstacle the point is `pos` itself)."""
+        pos = np.asarray(pos, float)
+        s = self.spheres
+        d = pos - s[:, :3]
+        n = np.linalg.norm(d, axis=1, keepdims=True)
+        sph = np.where(n > s[:, 3:4], s[:, :3] + s[:, 3:4] * d / np.maximum(n, 1e-9), pos)
+        c = self.cylinders
+        z = np.clip(pos[2], c[:, 2], c[:, 3])
+        dxy = pos[:2] - c[:, :2]
+        nxy = np.linalg.norm(dxy, axis=1, keepdims=True)
+        # radially outside: the rim; within the radius (above, below or inside): straight above/below `pos`
+        rim = np.where(nxy > c[:, 4:5], c[:, :2] + c[:, 4:5] * dxy / np.maximum(nxy, 1e-9), pos[:2])
+        cyl = np.column_stack([rim, z])
+        b = self.boxes
+        box = np.clip(pos, b[:, :3], b[:, 3:])
+        return np.vstack([sph.reshape(-1, 3), cyl.reshape(-1, 3), box.reshape(-1, 3)])
+
     def clearance(self, pos: np.ndarray) -> float:
         g, _ = self.gaps(np.asarray(pos, float))
         return float(g.min()) - C.MISSION_DRONE_RADIUS if len(g) else np.inf
@@ -113,7 +132,7 @@ def make_leg(rng: np.random.Generator, level: int, length: float | None = None) 
     spheres, cyls, boxes = [], [], []
 
     def spot(on_path: bool, spread: float):
-        """A point along the leg, away from the start (8 m) and the waypoint (6 m)."""
+        """A point along the leg, at least 15 m from the start and 10 m short of the waypoint."""
         x = rng.uniform(15.0, L - 10.0)
         y = rng.uniform(-2.0, 2.0) if on_path else rng.uniform(-spread, spread)
         return x, y

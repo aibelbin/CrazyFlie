@@ -135,9 +135,9 @@ class FollowAvoidAviary(F450Mixin, BaseRLAviary):
         self._scenario.advance(self.CTRL_TIMESTEP, self.pos[0], self.vel[0])
         self._action = a
         applied = a
-        if C.ACT_DELAY > 0:                  # the autopilot acts on the command from a step ago
-            self._act_queue.append(a)
+        if C.ACT_DELAY > 0:                  # the autopilot acts on the command from ACT_DELAY steps ago
             applied = self._act_queue.popleft()
+            self._act_queue.append(a)
         out = super().step(applied)
         self._prev_action = a
         if self._halo is not None:

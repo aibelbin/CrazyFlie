@@ -3,7 +3,7 @@ import pybullet as p
 import pytest
 
 from drone_follow import config as C
-from drone_follow.mission_world import MissionTerrain, attach_leg, make_leg
+from drone_follow.mission_world import Leg, MissionTerrain, attach_leg, make_leg
 
 
 def test_heightfield_matches_the_height_function_on_a_long_corridor():
@@ -60,6 +60,20 @@ def test_clearance_of_each_shape():
     assert leg.clearance(np.array([50.5, 0.0, g + 4])) < 0        # inside
     over = np.array([50.5, 0.0, g + 10])
     assert leg.clearance(over) == pytest.approx(2.0 - C.MISSION_DRONE_RADIUS)
+
+
+def test_closest_points_are_as_far_as_the_gaps():
+    leg = make_leg(np.random.default_rng(2), 3, length=100.0)
+    rng = np.random.default_rng(0)
+    for _ in range(300):
+        pos = rng.uniform([0, -10, 0], [100, 10, 15])
+        g, _ = leg.gaps(pos)
+        pts = leg.closest_points(pos)
+        assert pts.shape == (len(g), 3)
+        assert np.linalg.norm(pts - pos, axis=1) == pytest.approx(np.maximum(g, 0.0), abs=1e-9)
+    pole = Leg(10.0, np.zeros(3), np.zeros(3), leg.terrain, cylinders=np.array([[0.0, 0.0, 0.0, 8.0, 0.15]]))
+    assert pole.closest_points(np.array([3.0, 4.0, 2.0]))[0] == pytest.approx([0.09, 0.12, 2.0])
+    assert pole.closest_points(np.array([0.05, 0.0, 10.0]))[0] == pytest.approx([0.05, 0.0, 8.0])   # over the top
 
 
 def test_every_obstacle_exists_in_pybullet_up_to_its_top():

@@ -3,9 +3,14 @@ import pybullet as p
 import pytest
 
 from drone_follow import config as C
-from drone_follow.mission_env import M_N_RAYS, M_OBS_DIM, M_RANGES, make_mission_env
+from drone_follow.mission_env import (M_N_RAYS, M_OBS_DIM, M_PREV_ACTION, M_RANGES, make_mission_env,
+                                      sector_index, sector_ranges)
+from drone_follow.sensing import cast
 
-FWD = 2 * C.MISSION_N_AZ                       # elevation 0, azimuth 0: straight at the waypoint
+N_AZ = C.MISSION_N_AZ
+E0 = C.MISSION_ELEVS_DEG.index(0.0)
+FWD = E0 * N_AZ                                # elevation 0, azimuth 0: straight at the waypoint
+FWD_DOWN = (E0 - 1) * N_AZ                     # elevation -15, azimuth 0
 
 
 def straight(obs):
@@ -85,5 +90,92 @@ def test_leaving_the_corridor_is_a_failure():
     p.resetBasePositionAndOrientation(sim.DRONE_IDS[0], [10.0, C.MISSION_HALF_WIDTH + 1.0, sim.leg.start[2]],
                                       [0, 0, 0, 1], physicsClientId=sim.CLIENT)
     obs, r, term, trunc, info = env.step(np.zeros(3))
-    assert trunc and not term and info["failure"] == "out_of_bounds" and r < 0
+    assert term and not trunc and info["failure"] == "out_of_bounds" and r < 0
+    env.close()
+
+
+def test_sector_binning():
+    v = np.array([[10, 0, 0], [10, 0, -1.5], [10, 0, -5.0], [10, 0, 1.5], [10, 0, 5.0], [10, 0, 20.0],
+                  [0, 10, 0], [10, 3.9, 0], [10, 4.3, 0], [10, -0.2, 0]], float)
+    # 10 m ahead at -8.5 deg is past the -7.5 edge: the -15 bin; 63 deg up is the top bin; 21.3 deg left stays
+    # in the 22.5 deg sector (edge at 11.25 deg on either side); -1.1 deg is the forward sector.
+    assert sector_index(v).tolist() == [FWD, FWD_DOWN, (E0 - 2) * N_AZ, (E0 + 1) * N_AZ, (E0 + 2) * N_AZ,
+                                        (E0 + 2) * N_AZ, FWD + N_AZ // 4, FWD + 1, FWD + 1, FWD]
+    r = sector_ranges(np.array([[5.0, 0.0, 0.0], [3.0, 0.1, 0.0], [30.0, 0.0, 0.0]]))
+    assert r[FWD] == pytest.approx(np.hypot(3.0, 0.1)) and (np.delete(r, FWD) == C.MISSION_RANGE).all()
+
+
+def _add_obstacle(sim, sphere=None, cylinder=None):
+    """Put an obstacle in the leg (so the analytic sensor knows it) and in PyBullet (so the rays can hit it)."""
+    leg = sim.leg
+    if sphere is not None:
+        x, y, z, r = sphere
+        leg.spheres = np.vstack([leg.spheres, [sphere]])
+        leg.sphere_kind.append("rock")
+        col = p.createCollisionShape(p.GEOM_SPHERE, radius=r, physicsClientId=sim.CLIENT)
+        p.createMultiBody(0, col, basePosition=[x, y, z], physicsClientId=sim.CLIENT)
+    if cylinder is not None:
+        x, y, z0, z1, r = cylinder
+        leg.cylinders = np.vstack([leg.cylinders, [cylinder]])
+        leg.cylinder_kind.append("pole")
+        col = p.createCollisionShape(p.GEOM_CYLINDER, radius=r, height=z1 - z0, physicsClientId=sim.CLIENT)
+        p.createMultiBody(0, col, basePosition=[x, y, (z0 + z1) / 2], physicsClientId=sim.CLIENT)
+
+
+def test_sectors_see_a_thin_pole_between_the_rays():
+    env = make_mission_env(level=0, seed=7, length=60.0)()
+    env.reset(seed=7)
+    sim = env.unwrapped
+    pos = sim.pos[0].copy()
+    px, py = pos[0] + 15.0, pos[1] + 0.34                  # forward ray passes 0.19 m from the 0.15 m pole
+    g = sim.leg.ground([px, py])
+    _add_obstacle(sim, cylinder=[px, py, g - 0.5, g + 12.0, 0.15])
+    ray = cast(sim.CLIENT, pos, np.array([[1.0, 0.0, 0.0]]), C.MISSION_RANGE, C.MISSION_RAY_START)
+    assert ray[0] == pytest.approx(C.MISSION_RANGE)        # the forward ray alone misses it
+    for _ in range(6):                                     # let the delayed, smoothed sensor settle
+        obs, *_ = env.step(np.zeros(3))
+    d = np.hypot(px - sim.pos[0][0], py - sim.pos[0][1]) - 0.15
+    assert obs[M_RANGES][FWD] * C.MISSION_RANGE == pytest.approx(d, abs=0.6)
+    env.close()
+
+
+def test_a_sphere_ahead_and_below_lands_in_the_lower_sector():
+    env = make_mission_env(level=0, seed=8, length=60.0)()
+    env.reset(seed=8)
+    sim = env.unwrapped
+    pos = sim.pos[0].copy()
+    _add_obstacle(sim, sphere=[pos[0] + 10.0, pos[1], pos[2] - 1.5, 0.5])
+    for _ in range(6):
+        obs, *_ = env.step(np.zeros(3))
+    r = obs[M_RANGES] * C.MISSION_RANGE
+    assert r[FWD_DOWN] == pytest.approx(np.hypot(10.0, 1.5) - 0.5, abs=0.6)
+    assert r[FWD] > 15.0
+    env.close()
+
+
+def test_commands_reach_the_autopilot_one_step_late_and_obs_shows_the_latest():
+    assert C.MISSION_ACT_DELAY == 1
+    env = make_mission_env(level=0, seed=9, length=60.0)()
+    env.reset(seed=9)
+    sim = env.unwrapped
+    speeds = []
+    for k in (1, 2, 3):
+        a = np.array([0.1 * k, 0.0, 0.0])
+        obs, *_ = env.step(a)
+        speeds.append(float(np.linalg.norm(sim._v_target)))
+        assert obs[M_PREV_ACTION] == pytest.approx(a)        # the command just issued, not the one before
+    assert speeds == pytest.approx([0.0, 0.1 * C.MISSION_SPEED_LIMIT, 0.2 * C.MISSION_SPEED_LIMIT])
+    assert sim._v_target[0] > 0
+    env.close()
+
+
+def test_hovering_in_place_costs_reward():
+    env = make_mission_env(level=0, seed=10, length=60.0)()
+    env.reset(seed=10)
+    rewards = []
+    for _ in range(30):
+        _, r, term, trunc, _ = env.step(np.zeros(3))
+        assert not (term or trunc)
+        rewards.append(r)
+    assert sum(rewards) < 0 and np.mean(rewards) == pytest.approx(-C.MR_TIME, abs=0.003)
     env.close()
