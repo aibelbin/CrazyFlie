@@ -88,7 +88,9 @@ class BestByCollisions(BaseCallback):
     def run_eval(self):
         metrics = {}
         for lvl in self.levels:
-            env = self.envs.setdefault(lvl, make_env(difficulty=lvl, seed=EVAL_SEED0)())
+            if lvl not in self.envs:            # not setdefault: that built (and leaked) a new world every eval
+                self.envs[lvl] = make_env(difficulty=lvl, seed=EVAL_SEED0)()
+            env = self.envs[lvl]
             crashes, errs = 0, []
             for ep in range(self.episodes):
                 obs, _ = env.reset(seed=EVAL_SEED0 + ep)
@@ -133,6 +135,17 @@ class LatestSaver(BaseCallback):
         return True
 
 
+def rss_mb(pid="self"):
+    """Resident memory of a process in MB (Linux only; None elsewhere)."""
+    try:
+        with open(f"/proc/{pid}/status") as f:
+            for line in f:
+                if line.startswith("VmRSS"):
+                    return int(line.split()[1]) / 1024
+    except OSError:
+        return None
+
+
 class ProgressWriter(BaseCallback):
     """Writes progress.json every ~20 s for the web dashboard."""
 
@@ -159,6 +172,9 @@ class ProgressWriter(BaseCallback):
             self._write(now)
         return True
 
+    def _workers(self):
+        return getattr(getattr(self.training_env, "venv", None), "processes", [])
+
     def _write(self, now: float):
         buf = self.model.ep_info_buffer
         left = self.total - self.num_timesteps
@@ -175,6 +191,8 @@ class ProgressWriter(BaseCallback):
             "ep_reward": float(np.mean([e["r"] for e in buf])) if len(buf) else None,
             "ep_len_s": float(np.mean([e["l"] for e in buf])) / C.CTRL_FREQ if len(buf) else None,
             "updated_at": now,
+            "rss_mb": rss_mb(),                  # the learner; growth here starved WSL on 2026-10-27
+            "workers_rss_mb": sum(filter(None, (rss_mb(w.pid) for w in self._workers()))),
         }
         tmp = os.path.join(self.out, "progress.json.tmp")
         with open(tmp, "w") as f:
