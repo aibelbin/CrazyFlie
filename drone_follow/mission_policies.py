@@ -47,10 +47,12 @@ def potential_field(obs: np.ndarray, influence: float = 6.0, gain: float = 1.5) 
 
 class BendyRuler:
     """ArduPilot's BendyRuler, simplified to the sensor rays. Every ray not pointing steeply down is a candidate
-    direction; it is open if it and its two azimuth neighbours (so the gap fits the drone) see at least
-    `lookahead + margin` metres (13 m by default, just above the Supervisor's 12 m trigger). Fly the open one
-    closest to the waypoint direction, keeping the previous choice unless another is more than `hysteresis_deg`
-    closer, so it does not flip between two gaps."""
+    direction; it is open if it, its two azimuth neighbours (so the gap fits the drone) and the sector directly
+    below it (same azimuth, next lower elevation ring; the lowest ring has none) all see at least
+    `lookahead + margin` metres (13 m by default, just above the Supervisor's 12 m trigger). The sector below is
+    the vertical clearance: level flight just over a canopy or roof counts as blocked, so it climbs higher before
+    crossing. Fly the open one closest to the waypoint direction, keeping the previous choice unless another is
+    more than `hysteresis_deg` closer, so it does not flip between two gaps."""
 
     def __init__(self, lookahead: float = 10.0, hysteresis_deg: float = 10.0, min_elev: float = -15.0,
                  margin: float = 3.0):
@@ -62,7 +64,9 @@ class BendyRuler:
 
     def __call__(self, obs: np.ndarray) -> np.ndarray:
         r = ranges(obs).reshape(len(ELEVS), N_AZ)
-        free = np.minimum(r, np.minimum(np.roll(r, 1, axis=1), np.roll(r, -1, axis=1))).flatten()
+        side = np.minimum(r, np.minimum(np.roll(r, 1, axis=1), np.roll(r, -1, axis=1)))
+        below = np.vstack([np.full((1, N_AZ), np.inf), r[:-1]])     # same azimuth, one ring down
+        free = np.minimum(side, below).flatten()
         allowed = RAY_ELEV >= self.min_elev
         open_ = allowed & (free >= self.lookahead + self.margin)
         if not open_.any():                                          # boxed in: creep toward the most open direction
@@ -82,20 +86,33 @@ class BendyRuler:
 
 
 CONE_ELEVS = ELEVS[ELEVS >= 0][:2]          # the level ring and the first one up (0 and 15 deg)
+LOW_ELEV = ELEVS[ELEVS < 0].max()           # the first ring down (-15 deg)
+SIN_LOW = float(np.sin(np.radians(-LOW_ELEV)))   # flat ground `agl` below reads agl / SIN_LOW in that ring
 
 
 class Supervisor:
-    """ArduPilot-style handover. AUTO: fly straight at the waypoint. Switch to GUIDED (the avoider) when any
-    sector of the trigger cone reads under `trigger` metres. The cone is |azimuth| <= `cone_deg` at the level
-    and first upward elevations (CONE_ELEVS: 0 and 15 deg); downward sectors are left out because at cruise
-    height they see the ground (terrain), not obstacles. Hand back to AUTO once the same cone has read over
-    `trigger + margin` for `hold_s` seconds (one mask for both, so it does not re-trigger at once)."""
+    """ArduPilot-style handover. AUTO: fly straight at the waypoint. Switch to GUIDED (the avoider) when
+    - any sector of the trigger cone reads under `trigger` metres. The cone is |azimuth| <= `cone_deg` at the
+      level and first upward elevations (CONE_ELEVS: 0 and 15 deg); or
+    - any first-down sector (LOW_ELEV, -15 deg) within |azimuth| <= `cone_deg` reads under
+      min(trigger, ground_trigger * agl / SIN_LOW), agl = obs[7] * 10. Flat ground reads agl / SIN_LOW there, so
+      the ground itself never triggers, but a canopy or roof close under the flight path does.
+    Hand back to AUTO once both have read over the clear thresholds (`trigger + margin`, and
+    min(trigger + margin, ground_clear * agl / SIN_LOW)) for `hold_s` seconds: the same masks for both, so it
+    does not re-trigger at once. In AUTO, while any downward sector within the cone azimuths reads under
+    `floor_m`, the command never descends (vertical component >= 0), so AUTO does not settle onto a roof it has
+    just climbed over on its way back to the waypoint's altitude."""
 
     def __init__(self, avoider, trigger: float = 12.0, margin: float = 3.0, hold_s: float = 0.5,
-                 cone_deg: float = 45.0):
+                 cone_deg: float = 45.0, ground_trigger: float = 0.6, ground_clear: float = 0.7,
+                 floor_m: float = 3.0):
         self.avoider, self.trigger, self.margin = avoider, trigger, margin
+        self.ground_trigger, self.ground_clear, self.floor_m = ground_trigger, ground_clear, floor_m
         self.hold = max(1, int(round(hold_s * C.CTRL_FREQ)))
-        self.cone = (np.abs(RAY_AZ) <= cone_deg) & np.isin(RAY_ELEV, CONE_ELEVS)
+        in_az = np.abs(RAY_AZ) <= cone_deg
+        self.cone = in_az & np.isin(RAY_ELEV, CONE_ELEVS)
+        self.low = in_az & (RAY_ELEV == LOW_ELEV)
+        self.below = in_az & (RAY_ELEV < 0)
         self.reset()
 
     def reset(self):
@@ -105,16 +122,25 @@ class Supervisor:
 
     def __call__(self, obs: np.ndarray) -> np.ndarray:
         r = ranges(obs)
+        ground = max(float(obs[7]) * 10.0, 0.0) / SIN_LOW               # what flat ground reads in the low ring
         if not self.guided:
-            if (r[self.cone] < self.trigger).any():
+            if ((r[self.cone] < self.trigger).any()
+                    or (r[self.low] < min(self.trigger, self.ground_trigger * ground)).any()):
                 self.guided, self._clear = True, 0
                 if hasattr(self.avoider, "reset"):
                     self.avoider.reset()
         else:
-            self._clear = self._clear + 1 if (r[self.cone] > self.trigger + self.margin).all() else 0
+            clear = ((r[self.cone] > self.trigger + self.margin).all()
+                     and (r[self.low] > min(self.trigger + self.margin, self.ground_clear * ground)).all())
+            self._clear = self._clear + 1 if clear else 0
             if self._clear >= self.hold:
                 self.guided = False
-        return np.asarray(self.avoider(obs), float).reshape(3) if self.guided else straight_line(obs)
+        if self.guided:
+            return np.asarray(self.avoider(obs), float).reshape(3)
+        a = straight_line(obs)
+        if (r[self.below] < self.floor_m).any():                     # something close underneath: do not descend
+            a[2] = max(a[2], 0.0)
+        return a
 
 
 def load_ppo(path: str):
