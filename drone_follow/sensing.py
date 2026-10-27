@@ -1,4 +1,6 @@
 """Range sensing: a fan of ray casts around the drone, via PyBullet's ray tester."""
+from collections import deque
+
 import numpy as np
 import pybullet as p
 
@@ -32,3 +34,23 @@ def cast(client: int, pos: np.ndarray, dirs: np.ndarray, max_range: float,
 def range_scan(client: int, pos: np.ndarray) -> np.ndarray:
     """The follow env's strip: distance to the nearest surface along each ray, capped at MAX_RANGE."""
     return cast(client, pos, RAY_DIRS, C.MAX_RANGE)
+
+
+class RangeSensor:
+    """Depth sensor model: delayed, noisy, occasional dropouts (read max range), lightly smoothed.
+    Draws from the generator it is given, so seeded episodes stay reproducible."""
+
+    def __init__(self, rng: np.random.Generator, max_range: float):
+        self.rng, self.max_range = rng, max_range
+        self._hist = deque(maxlen=C.SENSOR_DELAY + 1)            # true ranges, oldest = what the sensor reports now
+        self._smooth = None
+
+    def __call__(self, true_ranges: np.ndarray) -> np.ndarray:
+        self._hist.append(true_ranges)
+        r = self._hist[0].copy()
+        rel_sigma, abs_sigma = C.RANGE_NOISE
+        r = r + self.rng.standard_normal(r.shape) * (rel_sigma * r + abs_sigma)
+        r[self.rng.random(r.shape) < C.RANGE_DROPOUT] = self.max_range
+        r = np.clip(r, 0.05, self.max_range)
+        self._smooth = r if self._smooth is None else 0.5 * self._smooth + 0.5 * r
+        return self._smooth.copy()

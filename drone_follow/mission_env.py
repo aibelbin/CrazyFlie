@@ -28,7 +28,7 @@ from gym_pybullet_drones.utils.enums import ActionType, ObservationType, Physics
 from drone_follow import config as C
 from drone_follow.f450 import F450, F450Mixin, WindField
 from drone_follow.mission_world import Leg, attach_leg, make_leg
-from drone_follow.sensing import cast, ray_directions
+from drone_follow.sensing import RangeSensor, cast, ray_directions
 
 M_RAY_DIRS = ray_directions(C.MISSION_N_AZ, C.MISSION_ELEVS_DEG)
 M_N_RAYS = len(M_RAY_DIRS)
@@ -91,8 +91,7 @@ class MissionAviary(F450Mixin, BaseRLAviary):
         self._agl = C.MISSION_ALT
         self._dist = self._prev_dist = None
         self._path, self._last_pos = 0.0, None
-        self._range_hist = deque(maxlen=C.SENSOR_DELAY + 1)
-        self._range_smooth = None
+        self._sense = RangeSensor(self._rng, C.MISSION_RANGE)
         self._act_queue = deque([np.zeros(3)] * C.MISSION_ACT_DELAY, maxlen=C.MISSION_ACT_DELAY)
 
     def reset(self, seed=None, options=None):
@@ -117,17 +116,6 @@ class MissionAviary(F450Mixin, BaseRLAviary):
         return out
 
     # ----------------------------------------------------------- observation
-    def _sense(self, true_ranges: np.ndarray) -> np.ndarray:
-        """Depth sensor: delayed, noisy, occasional dropouts, lightly smoothed (the same model as env.py)."""
-        self._range_hist.append(true_ranges)
-        r = self._range_hist[0].copy()
-        rel_sigma, abs_sigma = C.RANGE_NOISE
-        r = r + self._rng.standard_normal(r.shape) * (rel_sigma * r + abs_sigma)
-        r[self._rng.random(r.shape) < C.RANGE_DROPOUT] = C.MISSION_RANGE
-        r = np.clip(r, 0.05, C.MISSION_RANGE)
-        self._range_smooth = r if self._range_smooth is None else 0.5 * self._range_smooth + 0.5 * r
-        return self._range_smooth.copy()
-
     def _computeObs(self):
         s = self._getDroneStateVector(0)
         pos, rpy, vel = s[0:3], s[7:10], s[10:13]

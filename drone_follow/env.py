@@ -28,7 +28,7 @@ from gym_pybullet_drones.utils.enums import ActionType, DroneModel, ObservationT
 from drone_follow import config as C
 from drone_follow.f450 import F450, F450Mixin, WindField
 from drone_follow.scenario import Scenario
-from drone_follow.sensing import N_RAYS, range_scan
+from drone_follow.sensing import N_RAYS, RangeSensor, range_scan
 
 OBS_DIM = 16 + 2 * N_RAYS
 RANGE_SLICE = slice(16, 16 + N_RAYS)
@@ -103,21 +103,9 @@ class FollowAvoidAviary(F450Mixin, BaseRLAviary):
         return super().reset(seed=seed, options=options)
 
     def _reset_sensing(self):
-        self._range_hist = deque(maxlen=C.SENSOR_DELAY + 1)      # true ranges, oldest = what the sensor reports now
+        self._sense_ranges = RangeSensor(self._rng, C.MAX_RANGE)
         self._rel_hist = deque(maxlen=C.SENSOR_DELAY + 1)
-        self._range_smooth = None
         self._act_queue = deque([np.zeros(3)] * C.ACT_DELAY, maxlen=max(C.ACT_DELAY, 1))
-
-    def _sense_ranges(self, true_ranges: np.ndarray) -> np.ndarray:
-        """What the depth camera reports: delayed, noisy, with occasional dropouts, lightly smoothed."""
-        self._range_hist.append(true_ranges)
-        r = self._range_hist[0].copy()
-        rel_sigma, abs_sigma = C.RANGE_NOISE
-        r = r + self._rng.standard_normal(r.shape) * (rel_sigma * r + abs_sigma)
-        r[self._rng.random(r.shape) < C.RANGE_DROPOUT] = C.MAX_RANGE
-        r = np.clip(r, 0.05, C.MAX_RANGE)
-        self._range_smooth = r if self._range_smooth is None else 0.5 * self._range_smooth + 0.5 * r
-        return self._range_smooth.copy()
 
     def _wind_for_level(self):
         """Levels 4-5 are windy (F450 only): 4 = breeze with light gusts, 5 = strong wind with gusts.
