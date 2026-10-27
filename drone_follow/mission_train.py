@@ -4,7 +4,8 @@
 
 The policy learns whole legs (it is not wrapped in the supervisor during training); mission_evaluate scores
 it both alone (`rl_alone`) and under the supervisor (`rl`). Every --eval-every steps it scores itself on fixed
-legs and keeps best.zip by crash rate, then success rate.
+validation legs (seeds from VAL_SEED0, not the test legs mission_evaluate scores on) and keeps best.zip by crash
+rate, then success rate.
 """
 import argparse
 import json
@@ -23,6 +24,7 @@ from drone_follow.train_long import LatestSaver, ProgressWriter, TimeBudget
 
 MISSION_MIX = [0, 1, 1, 2, 2, 3, 3]          # levels cycled over the parallel envs
 EVAL_LEVELS = (1, 2, 3)
+VAL_SEED0 = 40_000                           # checkpoint-selection legs; mission_evaluate's EVAL_SEED0 (30_000) is the test set
 
 
 class MissionEval(BaseCallback):
@@ -48,7 +50,7 @@ class MissionEval(BaseCallback):
         policy = lambda obs: self.model.predict(obs, deterministic=True)[0]
         metrics = {}
         for lvl in self.levels:
-            r = run_legs(policy, lvl, self.legs)          # builds and closes its own env: no leak across evals
+            r = run_legs(policy, lvl, self.legs, seed0=VAL_SEED0)   # own env, closed after: no leak across evals
             metrics[f"L{lvl}_crash"] = r["crash_rate"]
             metrics[f"L{lvl}_success"] = r["success_rate"]
         score = float(np.mean([metrics[f"L{l}_crash"] for l in self.levels])
@@ -76,7 +78,7 @@ def main():
     ap.add_argument("--total-steps", type=int, default=5_000_000)
     ap.add_argument("--max-hours", type=float, default=12.0)
     ap.add_argument("--eval-every", type=int, default=1_000_000)
-    ap.add_argument("--eval-legs", type=int, default=20)
+    ap.add_argument("--eval-legs", type=int, default=50)
     ap.add_argument("--lr-start", type=float, default=3e-4)
     ap.add_argument("--lr-end", type=float, default=2e-5)
     ap.add_argument("--threads", type=int, default=2)

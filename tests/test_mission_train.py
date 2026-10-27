@@ -22,7 +22,8 @@ class FakeModel:
 def test_eval_keeps_the_best_score_and_logs_every_eval(tmp_path, monkeypatch):
     state = {}
 
-    def fake_run_legs(policy, level, legs):
+    def fake_run_legs(policy, level, legs, seed0=None):
+        assert seed0 == mission_train.VAL_SEED0 != 30_000          # validation legs, not the test legs
         crash, success = state["now"]
         return {"crash_rate": crash, "success_rate": success}
 

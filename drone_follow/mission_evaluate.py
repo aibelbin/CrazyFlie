@@ -3,7 +3,7 @@
     python -m drone_follow.mission_evaluate --policy bendy --level 2 --legs 500 --out results/mission/bendy_L2.json
     python -m drone_follow.mission_evaluate --table results/mission/*.json
 
-Heavy (500 legs take ~40 min per policy and level): run on gpu-sys, never the laptop.
+Heavy (measured: ~5 min per 500 legs per policy and level): run on gpu-sys, never the laptop.
 """
 import argparse
 import json
@@ -16,7 +16,9 @@ from drone_follow import config as C
 from drone_follow.mission_env import make_mission_env
 from drone_follow.mission_policies import BendyRuler, Supervisor, load_ppo, potential_field, straight_line
 
-EVAL_SEED0 = 30_000                      # distinct from training seeds (seed * 1000 + i)
+EVAL_SEED0 = 30_000                      # test legs. SB3's PPO(seed=s) reseeds the training envs as s + i (small
+                                         # seeds, then each env's own generator), so training never replays these
+                                         # legs; mission_train's checkpoint selection uses VAL_SEED0 = 40_000
 POLICIES = ("straight", "potential", "bendy", "rl", "rl_alone")
 
 
