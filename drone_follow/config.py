@@ -61,3 +61,27 @@ REWARD_SCALE = 0.1         # all rewards are multiplied by this, which keeps val
 ACTION_RATE_LIMIT = float(os.environ.get("DF_ACTION_RATE_LIMIT", "0"))   # max change of the commanded action per control step (0 = off)
 R_TILT = float(os.environ.get("DF_R_TILT", "0"))                         # penalty for leaning toward a flip (0 = off)
 TILT_START = 0.35                                                        # rad, tilt penalty starts here (a flip is MAX_TILT)
+
+# Mission legs (waypoint flight with obstacle avoidance; always the F450 with sensor noise, see mission_env.py)
+MISSION_CRUISE = 5.0            # m/s, ArduPilot's default WPNAV_SPEED
+MISSION_SPEED_LIMIT = 6.0       # m/s at |action| = 1
+MISSION_ALT = 5.0               # m above the ground at the start and at the waypoint
+MISSION_CEILING = 30.0          # m above the ground; higher ends the leg as a failure
+MISSION_LEG = (80.0, 150.0)     # m, range of leg lengths
+MISSION_HALF_WIDTH = 30.0       # m, corridor half-width; leaving it ends the leg as a failure
+MISSION_GOAL_RADIUS = 2.0       # m, success when this close to the waypoint
+MISSION_TIME_FACTOR = 3.0       # timeout = this x the straight-line time at cruise speed
+MISSION_RANGE = 20.0            # m, sensor range (stopping from 5 m/s alone takes ~4-5 m)
+MISSION_N_AZ = 16
+MISSION_ELEVS_DEG = (-35.0, -15.0, 0.0, 15.0, 35.0)
+MISSION_RAY_START = 0.4         # m, rays start outside the F450's 0.23 m collision cylinder
+MISSION_DRONE_RADIUS = 0.32     # m, F450 frame + props (config.DRONE_RADIUS depends on DF_DRONE)
+MISSION_ACT_DELAY = 1           # control steps between a command and the autopilot using it
+# Mission reward
+MR_PROGRESS = 0.1               # per metre gained toward the waypoint
+MR_SUCCESS = 10.0
+MR_CRASH = -20.0
+MR_FAIL = -10.0                 # timeout, leaving the corridor or climbing above the ceiling
+MR_PROXIMITY = 0.05             # per step at worst, for level or upward rays closer than MR_PROXIMITY_START
+MR_PROXIMITY_START = 3.0        # m
+MR_SMOOTH = 0.02                # per unit of command change

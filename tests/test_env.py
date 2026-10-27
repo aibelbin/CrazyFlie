@@ -172,3 +172,14 @@ def test_smoothed_policy_moves_part_way():
     obs[13:16] = [0.2, 0.0, 0.0]                              # previous action
     out = smoothed(lambda o: np.array([1.0, 0.0, 0.0]), 0.5)(obs)
     assert out[0] == pytest.approx(0.6)
+
+
+def test_cast_takes_any_directions_and_range(client):
+    from drone_follow.sensing import cast, ray_directions
+    col = p.createCollisionShape(p.GEOM_SPHERE, radius=0.5, physicsClientId=client)
+    p.createMultiBody(0, col, basePosition=[15, 0, 1], physicsClientId=client)
+    dirs = ray_directions(16, (0.0,))
+    assert dirs.shape == (16, 3) and np.allclose(dirs[0], [1, 0, 0]) and np.allclose(dirs[4], [0, 1, 0], atol=1e-9)
+    r = cast(client, np.array([0.0, 0.0, 1.0]), dirs, 20.0, start_offset=0.4)
+    assert r[0] == pytest.approx(14.5, abs=0.05)              # sphere surface at x = 14.5
+    assert r[8] == pytest.approx(20.0)                        # nothing behind
