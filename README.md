@@ -9,6 +9,20 @@ person is found with a **pretrained YOLO** model. Physics come from
 > MacBook Air). Training is done on a remote machine and only the results come back.
 > Running, evaluating a few episodes and the 3D viewer are light and fine locally.
 
+## Waypoint missions (current focus)
+
+The drone flies a mission leg (80-150 m at 5 m/s) through trees, poles, rocks, buildings and a wall. A
+supervisor hands control from the mission (ArduPilot AUTO) to an avoider (GUIDED) when something is within
+12 m ahead. Avoiders compared on the same seeded legs: straight line, potential field, a BendyRuler-style
+planner and a PPO policy. Start with `CLAUDE.md` (setup on Windows, commands, current state).
+
+![Mission leg, level 3](docs/img/mission_L3.png)
+
+```
+python -m drone_follow.mission_viz --level 3 --pick --out videos/mission_L3.png --gif videos/mission_L3.gif
+python -m drone_follow.mission_evaluate --policy bendy --level 2 --legs 50 --out results/mission/bendy_L2.json
+```
+
 ## The F450 drone and the outdoor world (levels 4-5)
 
 The target hardware is a DIY F450 flown by ArduPilot, so the simulation can model it:

@@ -6,6 +6,7 @@
 Heavy (measured: ~5 min per 500 legs per policy and level): run on gpu-sys, never the laptop.
 """
 import argparse
+import glob
 import json
 import os
 from collections import Counter
@@ -108,8 +109,9 @@ def main():
     ap.add_argument("--out", default=None, help="write the result to this JSON file")
     ap.add_argument("--table", nargs="*", default=None, help="print a markdown table of these result files")
     args = ap.parse_args()
-    if args.table is not None:
-        print(markdown_table([json.load(open(p)) for p in args.table]))
+    if args.table is not None:                   # expand patterns here: PowerShell passes "results/mission/*.json" as is
+        paths = sorted(f for p in args.table for f in (glob.glob(p) or [p]) if "DONE_" not in f)
+        print(markdown_table([json.load(open(p)) for p in paths]))
         return
     r = run_legs(make_policy(args.policy, args.model), args.level, args.legs, args.seed0)
     r["policy"] = args.policy if not args.model else f"{args.policy}:{os.path.basename(os.path.dirname(args.model))}"

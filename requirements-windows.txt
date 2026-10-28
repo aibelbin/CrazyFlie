@@ -1,0 +1,15 @@
+# Windows: install pybullet from conda-forge first (pip would try to compile it), then:
+#   pip install -r requirements-windows.txt
+# Enough for the mission task (sim, avoiders, evaluation, visualization, PPO). The webcam demo also needs
+# ultralytics and opencv-python (see requirements.txt).
+gymnasium>=1.4
+stable-baselines3>=2.9
+torch
+numpy
+scipy
+transforms3d
+control
+pillow
+matplotlib
+tensorboard
+pytest
